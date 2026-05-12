@@ -1,27 +1,39 @@
 name: guitar-chord
 channels:
-  - defaults
   - pytorch
+  - nvidia
   - conda-forge
+  - defaults
+
 dependencies:
   - python=3.10
-  - numpy>=1.19.0
-  - pandas>=1.2.0
-  - matplotlib>=3.3.0
-  - scikit-learn>=0.24.0
-  - pytorch
-  - torchvision
-  - torchaudio
-  - requests>=2.25.0
-  - tqdm>=4.60.0
+
+  # Tudományos alap (conda)
+  - numpy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - seaborn
+  - tqdm
+  - pillow
+  - jupyter
+  - ipykernel
+  - scipy
+
+  # PyTorch – pip-ről (conda MKL konfliktus elkerülése miatt)
   - pip
   - pip:
-    - numpy>=1.19.0
-    - pandas>=1.2.0
-    - matplotlib>=3.3.0
-    - scikit-learn>=0.24.0
-    - torch>=1.8.0
-    - torchvision>=0.9.0
-    - torchaudio>=0.8.0
-    - requests>=2.25.0
-    - tqdm>=4.60.0
+    - torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+    - torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+    - torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+# Telepítési útmutató:
+#   conda env create -f environment.yaml
+#   conda activate guitar-chord
+#
+# Ellenőrzés:
+#   python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+#
+# Megjegyzés: A PyTorch pip-ről települ (nem conda-ból), mert a conda pytorch channel
+# libtorch CPU-only verziót telepíthet, ami MKL szimbólum-konfliktust okoz.
+# Tesztelt konfiguráció: NVIDIA T500, CUDA 12.4, Python 3.10, Ubuntu/Linux.

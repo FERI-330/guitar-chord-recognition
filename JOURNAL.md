@@ -119,3 +119,114 @@
 ---
 
 *Ez a dokumentum folyamatosan bővül. Semmi nem törlődik – minden döntés és fázis visszakereshető.*
+
+---
+
+## 🗓️ 2026-05-12 – Preprocessing fázis (`03_preprocessing.ipynb`)
+
+### Elvégzett műveletek
+
+- `GuitarChordDataset(Dataset)` PyTorch osztály implementálva (manifest-alapú)
+- Augmentációs pipeline (train) és clean pipeline (val/test) definiálva
+- ImageNet normalizálás alkalmazva (transfer learning előfeltétele)
+- Class weights kiszámítva inverz frekvencia módszerrel (`w_c = N_train / (K × n_c)`)
+- DataLoader setup: train shuffle + drop_last=True, val/test fix
+- Sanity check: denormalizált batch vizualizáció
+
+### Döntések
+
+| Szempont | Döntés |
+|----------|--------|
+| Célméret | **224×224** px |
+| Normalizálás | **ImageNet** mean/std – pretrained modellekhez szükséges |
+| Augmentáció | RandomHorizontalFlip(p=0.5), ColorJitter(br=0.3, ct=0.3, sat=0.2, hue=0.1), RandomRotation(±15°) |
+| Class weight | Inverz frekvencia: G (~1.73×), No hand (~2.59×) kapják a legmagasabb súlyt |
+| Framework | PyTorch + torchvision.transforms |
+
+### Státusz
+✅ DataLoader pipeline kész, class weights számítva, sanity check vizualizáció generálva
+
+---
+
+## 🗓️ 2026-05-12 – Környezeti konfiguráció és hibajavítás
+
+### Probléma: CUDA nem volt elérhető
+
+**Tünet:** `torch.cuda.is_available()` → `False`
+
+**Diagnózis:** Kettős, egymásnak ellentmondó PyTorch telepítés volt a környezetben:
+- `libtorch-2.10.0` conda-ból: **CPU-only** build (`cpu_openblas_h7e86a07_3`)
+- `pytorch-cuda=12.4` conda-ból + `nvidia-*-cu12` csomagok pip-ből: CUDA-s runtime
+- A conda a CPU-s `libtorch`-ot töltötte be, figyelmen kívül hagyva a pip-es CUDA binárisokat
+
+**Gyökérok:** Az eredeti `environment.yaml` nem rögzítette a `pytorch-cuda` verziót, így a conda solver CPU-only `libtorch`-ot oldott fel, miközben a pip-es nvidia csomagok egymásnak ellentmondó szimbólumokat hoztak.
+
+### Második hiba: `iJIT_NotifyEvent` undefined symbol
+
+**Tünet:**
+```
+ImportError: libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
+```
+
+**Diagnózis:** A conda-forge `intel-openmp` és a pytorch channel `mkl` verziói közötti szimbólum-konfliktus. Az `iJIT_NotifyEvent` az Intel VTune profiler része; a conda-forge verziója nem exportálta ezt a szimbólumot a PyTorch által várt formában.
+
+**Sikertelen javítási kísérlet:**
+```bash
+conda install mkl=2025.0.0 intel-openmp=2025.0.0 -c defaults --override-channels -y
+# Eredmény: "All requested packages already installed." – nem segített
+```
+
+### Megoldás: PyTorch teljes cseréje pip-re
+
+```bash
+# 1. Conda PyTorch eltávolítása
+conda remove pytorch torchvision torchaudio pytorch-cuda pytorch-mutex torchtriton --force -y
+
+# 2. pip-es telepítés (saját bundled MKL/OpenMP, nincs külső konfliktus)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+**Eredmény:**
+```
+PyTorch: 2.6.0+cu124
+CUDA elérhető: True
+GPU: NVIDIA T500
+```
+
+### `environment.yaml` frissítve
+
+- PyTorch forrás: conda → **pip** (`https://download.pytorch.org/whl/cu124`)
+- Verziók rögzítve: `torch==2.6.0+cu124`, `torchvision==0.21.0+cu124`, `torchaudio==2.6.0+cu124`
+- Csatornák: `pytorch`, `nvidia`, `conda-forge`, `defaults` (pytorch csatorna megmarad a CUDA runtime csomagokhoz)
+
+### Tanulság
+> Ne keverd a conda és pip PyTorch telepítést. Ha pip-pel telepíted a `torch`-ot, távolítsd el előbb a conda-verziót `--force` flag-gel, különben a conda-s `libtorch` felülírja a pip-es binárisokat.
+
+### Státusz
+✅ CUDA gyorsítás működik – `NVIDIA T500`, CUDA 12.4, PyTorch 2.6.0
+
+---
+
+## 🔜 Következő fázis: `04_model.ipynb`
+
+| # | Lépés | Terv |
+|---|-------|------|
+| 1 | Pretrained alap | EfficientNet-B0 (torchvision) |
+| 2 | Fine-tuning | Frozen backbone → classifier tanítás → fokozatos felolvasztás |
+| 3 | Loss | `CrossEntropyLoss(weight=class_weights)` |
+| 4 | Optimizer | AdamW, lr=1e-3 (classifier), lr=1e-4 (backbone) |
+| 5 | Scheduler | CosineAnnealingLR |
+| 6 | Early stopping | patience=10, monitor: val_loss |
+| 7 | Checkpoint | legjobb val_acc alapján mentés |
+
+---
+
+## 🛠️ 2026-05-12 – Fixes
+
+- Added `src/models.py` (EfficientNet-B0 helper) and `src/train.py` (manifest Dataset, transforms, simple training loop).
+- Created starter notebook `notebooks/04_model.ipynb` with an example dry-run cell.
+- Fixed missing `VAL_RATIO` / `TEST_RATIO` constants in `notebooks/02_split_manifest.ipynb` to resolve a NameError during the stratified split.
+- Documented recommended environment steps to keep PyTorch installed via `pip` (cu124 wheels) and avoid conda CPU-only conflicts.
+- Updated project TODOs to reflect implemented files; next steps: run dry-run training and optionally enable AMP.
+
+These fixes were applied to prepare the repository for the model training phase.
