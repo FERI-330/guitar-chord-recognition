@@ -148,9 +148,9 @@
 
 ---
 
-## 🗓️ 2026-05-12 – Környezeti konfiguráció és hibajavítás
+## 🗓️ 2026-05-12 – Környezeti konfiguráció és hibajavítás (1. körös)
 
-### Probléma: CUDA nem volt elérhető
+### Probléma: CUDA nem volt elérhető – vegyes conda/pip konfliktus
 
 **Tünet:** `torch.cuda.is_available()` → `False`
 
@@ -194,10 +194,8 @@ GPU: NVIDIA T500
 ```
 
 ### `environment.yaml` frissítve
-
 - PyTorch forrás: conda → **pip** (`https://download.pytorch.org/whl/cu124`)
 - Verziók rögzítve: `torch==2.6.0+cu124`, `torchvision==0.21.0+cu124`, `torchaudio==2.6.0+cu124`
-- Csatornák: `pytorch`, `nvidia`, `conda-forge`, `defaults` (pytorch csatorna megmarad a CUDA runtime csomagokhoz)
 
 ### Tanulság
 > Ne keverd a conda és pip PyTorch telepítést. Ha pip-pel telepíted a `torch`-ot, távolítsd el előbb a conda-verziót `--force` flag-gel, különben a conda-s `libtorch` felülírja a pip-es binárisokat.
@@ -207,26 +205,94 @@ GPU: NVIDIA T500
 
 ---
 
-## 🔜 Következő fázis: `04_model.ipynb`
+## 🗓️ 2026-05-12 – Modell sorozat megtervezése és notebookok létrehozása
 
-| # | Lépés | Terv |
-|---|-------|------|
-| 1 | Pretrained alap | EfficientNet-B0 (torchvision) |
-| 2 | Fine-tuning | Frozen backbone → classifier tanítás → fokozatos felolvasztás |
-| 3 | Loss | `CrossEntropyLoss(weight=class_weights)` |
-| 4 | Optimizer | AdamW, lr=1e-3 (classifier), lr=1e-4 (backbone) |
-| 5 | Scheduler | CosineAnnealingLR |
-| 6 | Early stopping | patience=10, monitor: val_loss |
-| 7 | Checkpoint | legjobb val_acc alapján mentés |
+### Elvégzett műveletek
+
+- `04_model.ipynb` átnevezve → `04c_efficientnet_b0.ipynb`
+- Modell-összehasonlítási sorozat megtervezve és implementálva
+
+### Notebook sorozat
+
+| Notebook | Modellek | Leírás |
+|----------|----------|--------|
+| `04a_baseline_ml.ipynb` | SVM (HOG), SVM (CNN features), RF, KNN, LR, XGBoost | Hagyományos ML baseline HOG + ResNet50 avgpool features alapján |
+| `04b_mobile_cnn.ipynb` | MobileNetV3-Small, MobileNetV3-Large, ShuffleNetV2 x1.0 | Könnyűsúlyú CNN-ek, két fázisú fine-tuning |
+| `04c_efficientnet_b0.ipynb` | EfficientNet-B0 | Kétfázisú fine-tuning (átnevezett `04_model.ipynb`) |
+| `04d_advanced_cnn.ipynb` | ResNet-50, EfficientNet-B3 | Nagyobb kapacitású CNN-ek, teljes összehasonlítás |
+| `04e_vit.ipynb` | ViT-B/16 | Vision Transformer (opcionális, VRAM-igényes) |
+| `05_model_selection.ipynb` | Ensemble + kiválasztás | Legjobb modellek összesítése |
+
+### Ajánlott futtatási sorrend és várható accuracy
+
+| Rang | Modell | Várható Test Acc (kis adat) |
+|------|--------|---------------------------|
+| 1 | EfficientNet-B3 | ~90–94% |
+| 2 | ResNet-50 | ~88–92% |
+| 3 | EfficientNet-B0 | ~85–92% |
+| 4 | MobileNetV3-Large | ~80–88% |
+| 5 | SVM + CNN features | ~75–82% |
+| 6 | MobileNetV3-Small | ~78–85% |
+| 7 | ShuffleNetV2 | ~75–83% |
+| 8–10 | HOG-alapú ML modellek | ~60–78% |
+
+### Státusz
+✅ Mind a 4 notebook (`04a`–`04d`) elkészítve, letölthető
 
 ---
 
-## 🛠️ 2026-05-12 – Fixes
+## 🗓️ 2026-05-12 – Környezeti hiba (2. körös): `CUDA unknown error`
 
-- Added `src/models.py` (EfficientNet-B0 helper) and `src/train.py` (manifest Dataset, transforms, simple training loop).
-- Created starter notebook `notebooks/04_model.ipynb` with an example dry-run cell.
-- Fixed missing `VAL_RATIO` / `TEST_RATIO` constants in `notebooks/02_split_manifest.ipynb` to resolve a NameError during the stratified split.
-- Documented recommended environment steps to keep PyTorch installed via `pip` (cu124 wheels) and avoid conda CPU-only conflicts.
-- Updated project TODOs to reflect implemented files; next steps: run dry-run training and optionally enable AMP.
+### Probléma
 
-These fixes were applied to prepare the repository for the model training phase.
+**Tünet:** `torch.cuda.is_available()` → `False`, hibaüzenet:
+```
+UserWarning: CUDA initialization: CUDA unknown error
+(Triggered internally at /pytorch/c10/cuda/CUDAFunctions.cpp:109.)
+RuntimeError: CUDA unknown error
+```
+
+**Fontos:** `nvidia-smi` rendesen futott, a GPU látható volt OS szinten – a hiba PyTorch/kernel driver szinten volt.
+
+### Diagnózis – okkeresés sorrendben
+
+1. **Első gyanú:** conda-s CUDA runtime csomagok ütközése a pip-es PyTorch `nvidia-*-cu12` csomagjaival
+   - `cuda-version 12.9` (nvidia csatorna) automatikusan frissíthetett, magával húzva conda-s CUDA runtime könyvtárakat
+   - Megoldási kísérlet: conda CUDA csomagok eltávolítása + pip reinstall → **nem segített**
+
+2. **Valódi gyökérok:** `nvidia_uvm` kernel modul "szennyezett" állapotba került
+   - Az nvidia-smi kimenetében látható volt egy aktív Python process (PID 67453, 50MiB), amely CUDA kontextust foglalt
+   - Logout **nem elegendő** – a kernel modulok betöltve maradnak, az Xorg is folyamatosan futott
+
+### Megoldási kísérletek sorrendben
+
+| Kísérlet | Eredmény |
+|---------|---------|
+| `sudo rmmod nvidia_uvm && sudo modprobe nvidia_uvm` | ❌ Nem működött – Xorg lefoglalta a modult |
+| Logout és újra bejelentkezés | ❌ Kernel modulok megmaradtak |
+| `sudo reboot` | ✅ **Megoldás** |
+
+### Megoldás
+
+```bash
+sudo reboot
+```
+
+Reboot után:
+```
+PyTorch: 2.6.0+cu124
+CUDA: True
+GPU: NVIDIA T500
+```
+
+### Tanulság
+> A `nvidia_uvm` kernel modul "frozen" állapotba kerülhet suspend/resume után, vagy ha egy Python process nem szabályosan zárta le a CUDA kontextust. Bejelentkezett KDE Plasma munkamenetben az Xorg folyamatosan foglalja a modult – ezért csak teljes reboot garantálja a tiszta CUDA inicializációt.
+>
+> Szerveres (headless) környezetben alternatíva: `sudo systemctl stop gdm && sudo rmmod nvidia_uvm && sudo modprobe nvidia_uvm && sudo systemctl start gdm` – de ez kilövi a grafikus munkamenetet.
+
+### Státusz
+✅ CUDA működik, fejlesztés folytatható – következő lépés: `04a_baseline_ml.ipynb` futtatása
+
+---
+
+*Ez a dokumentum folyamatosan bővül. Semmi nem törlődik – minden döntés és fázis visszakereshető.*

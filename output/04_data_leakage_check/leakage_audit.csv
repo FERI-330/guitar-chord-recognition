@@ -1,0 +1,6 @@
+Ellenőrzés,Kérdés,Eredmény
+Fájlnév-duplikáció (cross-split),cross_split szivárgás?,✅ OK
+MD5-alapú szivárgás (cross-split),bájt-azonos képek?,✅ OK
+MD5-duplikáció (intra-split),azonos spliten belül?,✅ OK
+Osztályazonosság,1 fájl = 1 osztály?,✅ OK
+Perceptual hash (threshold=4),vizuálisan hasonló képek cross-split?,❌ PROBLÉMA
