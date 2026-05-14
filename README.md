@@ -5,25 +5,36 @@ The source of truth is `data/split_manifest.csv`, generated from `data/all/` by 
 
 ## Current workflow
 
-1. Build the manifest in `notebooks/02_split_manifest.ipynb`.
-2. Preprocess and inspect batches in `notebooks/03_preprocessing.ipynb`.
-3. Train the EfficientNet-B0 baseline in `notebooks/04_model.ipynb` or via `src/train.py`.
+1. **EDA** (`notebooks/01_EDA.ipynb`): Explore the data, check for issues, and gather statistics.
+2. **Manifest** (`notebooks/02_split_manifest.ipynb`): Generate stratified 70/15/15 split from `data/all/`.
+3. **Preprocessing** (`notebooks/03_preprocessing.ipynb`): Set up PyTorch DataLoaders, augmentations, and class weights.
+4. **Data Leakage Check** (`notebooks/04_data_leakage_check.ipynb`): Verify no duplicate images between train/val/test using MD5 and pHash.
+5. **Model Training** – Choose a notebook based on your architecture:
+   - `notebooks/04a_baseline_ml.ipynb` – Scikit-learn baseline models (baseline_ml)
+   - `notebooks/04b_mobile_cnn.ipynb` – MobileNet v3 (small & large variants)
+   - `notebooks/04c_efficientnet_b0.ipynb` – EfficientNet-B0 (two training phases: phA, phB)
+   - `notebooks/04d_advanced_cnn.ipynb` – Advanced CNN architectures (two phases: phA, phB)
 
 ## Repository layout
 
 ```
 .
 ├── data/
-│   ├── all/
-│   ├── training/
-│   ├── test/
-│   └── split_manifest.csv
+│   ├── all/                    # Source images (A, B, C, D, E, F, G, No hand)
+│   ├── training/               # Reference folder (legacy)
+│   ├── test/                   # Reference folder (legacy)
+│   └── split_manifest.csv      # Split source of truth (70/15/15)
 ├── notebooks/
 │   ├── 01_EDA.ipynb
 │   ├── 02_split_manifest.ipynb
 │   ├── 03_preprocessing.ipynb
-│   └── 04_model.ipynb
-├── output/
+│   ├── 04_data_leakage_check.ipynb
+│   ├── 04a_baseline_ml.ipynb
+│   ├── 04b_mobile_cnn.ipynb
+│   ├── 04c_efficientnet_b0.ipynb
+│   └── 04d_advanced_cnn.ipynb
+├── output/                     # All notebook outputs (figures, results)
+├── checkpoints/                # Trained model weights
 ├── src/
 │   ├── models.py
 │   └── train.py
@@ -71,19 +82,29 @@ The manifest keeps the raw folder structure untouched and records the split assi
 
 ## Training entry points
 
-### Notebook
+### Notebooks (Interactive)
 
-Open `notebooks/04_model.ipynb` for the interactive training workflow.
+Each notebook handles a complete training pipeline with results saved to `output/<notebook_name>/`:
+
+- **`notebooks/04a_baseline_ml.ipynb`** – Scikit-learn baseline (LogisticRegression, SVM, RandomForest)
+- **`notebooks/04b_mobile_cnn.ipynb`** – MobileNet v3 small and large
+- **`notebooks/04c_efficientnet_b0.ipynb`** – EfficientNet-B0 with class-weighted loss
+- **`notebooks/04d_advanced_cnn.ipynb`** – Custom advanced CNN architecture
+
+Each notebook saves:
+- **Results**: `output/<name>/results.csv` with metrics (accuracy, precision, recall, F1)
+- **Checkpoints**: Best model weights to `checkpoints/best_<model>_ph{A,B}.pth`
+- **Figures**: Training curves, confusion matrices, class-wise metrics
 
 ### Script
 
-`src/train.py` provides a small reproducible pipeline:
+`src/train.py` provides a reproducible training pipeline:
 
 ```bash
 python -m src.train
 ```
 
-Or call it with explicit arguments from Python:
+Or call it with explicit arguments:
 
 ```python
 from src.train import main
@@ -92,23 +113,42 @@ main(
     manifest_path="data/split_manifest.csv",
     batch_size=16,
     img_size=224,
-    epochs=1,
+    epochs=50,
+    model_name="efficientnet_b0",
 )
 ```
 
-## Model baseline
+## Model baselines
 
-The first baseline is EfficientNet-B0 from `torchvision`, with the classifier replaced for 8 classes.
-The training loop uses class-weighted cross entropy and saves the best checkpoint to `checkpoints/best_model.pth`.
+Multiple architectures are trained and compared:
+
+| Architecture | Checkpoint(s) | Notes |
+|--------------|--------------|-------|
+| **Baseline ML** | `baseline_ml/` | Scikit-learn models (baseline for comparison) |
+| **MobileNet v3** | `best_MobSmall_phA.pth`, `best_MobSmall_phB.pth`, `best_MobLarge_phA.pth`, `best_MobLarge_phB.pth` | Lightweight CNN (small: 2.5M params, large: 5.4M params) |
+| **ShuffleNet v2** | `shufflenet_v2_x1_0.pth`, `best_shuffle_phA.pth`, `best_shuffle_phB.pth` | Efficient architecture optimized for mobile |
+| **EfficientNet-B0** | `best_EfficientNet_phA.pth`, `best_EfficientNet_phB.pth` | Balanced accuracy/efficiency baseline |
+| **Advanced CNN** | `best_AdvancedCNN_phA.pth`, `best_AdvancedCNN_phB.pth` | Custom deeper architecture for higher capacity |
+
+**Training Phases:**
+- **Phase A (phA):** Initial training on full dataset
+- **Phase B (phB):** Fine-tuning or transfer learning continuation
 
 ## Outputs
 
-- Notebook figures are written under `output/<notebook_name>/`
-- The training checkpoint is written to `checkpoints/best_model.pth`
-- The journal in `JOURNAL.md` records major implementation and debugging decisions
+- **Notebook outputs**: Figures, metrics, and results saved under `output/<notebook_name>/`
+- **Model checkpoints**: Best weights from each architecture/phase saved to `checkpoints/best_<model>_ph{A,B}.pth`
+- **Development log**: See `JOURNAL.md` for implementation decisions, hyperparameters, and debugging notes
 
 ## Notes
 
-- `data/training/` and `data/test/` remain as reference folders only.
-- `data/split_manifest.csv` is the only split source used by the new notebooks.
-- If you hit CUDA or import issues, check `JOURNAL.md` for the pip-based PyTorch setup that avoids the conda `libtorch` conflict.
+- **Data source**: `data/all/` (297 images across 8 classes)
+- **Split source of truth**: `data/split_manifest.csv` (generated by `02_split_manifest.ipynb`)
+- **Legacy folders**: `data/training/` and `data/test/` remain for reference only—they are not used by the new manifest-based pipeline
+- **Reproducibility**: All notebooks use `random_state=42` for deterministic splits and initialization
+- **PyTorch setup**: Install PyTorch via pip with CUDA support to avoid conda libtorch conflicts:
+  ```bash
+  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+  ```
+- **Data leakage**: Run `04_data_leakage_check.ipynb` to verify train/val/test independence using MD5 and pHash
+- **Detailed log**: See `JOURNAL.md` for development decisions, hyperparameter choices, and debugging notes
