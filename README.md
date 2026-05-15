@@ -9,6 +9,13 @@ The source of truth is `data/split_manifest.csv`, generated from `data/all/` by 
 2. **Manifest** (`notebooks/02_split_manifest.ipynb`): Generate stratified 70/15/15 split from `data/all/`.
 3. **Preprocessing** (`notebooks/03_preprocessing.ipynb`): Set up PyTorch DataLoaders, augmentations, and class weights.
 4. **Data Leakage Check** (`notebooks/04_data_leakage_check.ipynb`): Verify no duplicate images between train/val/test using MD5 and pHash.
+
+## Progress
+
+- Edge-first fretboard homography implemented in `notebooks/03_feature_pipeline.ipynb` (detect_neck_lines + fit_corners_from_lines). The pipeline now prefers edges-derived corners and falls back to bbox-based homography.
+- Batch feature extraction completed: 297 images → features of dimension 139 (train 207, val 45, test 45). Sanity checks show no NaN/Inf in feature matrices.
+- Known issue: a non-trivial subset of images produce faulty/low-confidence fretboard detections (low `bund_det_rate` or `H_valid==0`). Diagnostics and triage are pending — see `JOURNAL.md` for details and next steps.
+- Next: export CSV of weak detections, triage failure modes, tune Hough/fallback parameters, and re-run batch extraction.
 5. **Model Training** – Choose a notebook based on your architecture:
    - `notebooks/04a_baseline_ml.ipynb` – Scikit-learn baseline models (baseline_ml)
    - `notebooks/04b_mobile_cnn.ipynb` – MobileNet v3 (small & large variants)

@@ -122,6 +122,39 @@
 
 ---
 
+## 🗓️ 2026-05-15 – Naplófrissítés: README és rövid összefoglaló
+
+- Röviden: él-alapú (edge-first) fogólap-detektálás implementálva (`notebooks/03_feature_pipeline.ipynb`), batch feature-extrahálás lefutott (297 kép, feature-dim=139), de sok hibás detektálás maradt. README frissítve a rövid státusszal.
+- Következő lépés: exportálom a gyenge detekciójú képek listáját (CSV), majd triage + Hough/fallback finomhangolás. Lásd TODO-lista.
+
+
+---
+
+## 🗓️ 2026-05-15 – Folyamatban (geometriai modell és detektálás)
+
+### Rövid státusz
+
+- Elvégeztem az él-alapú (edge-first) fogólap-modellezés implementálását a `03_feature_pipeline.ipynb` notebookban: van teljes képes vonaldetektor, vonalakból sarokpont-felépítés és a homográfia-illesztés preferálva az eredeti bbox-fallback mellett.
+- A notebook lokális sanity check és a teljes batch feature-extrahálás lefutott: kinyert feature-ek shape-je változatlanul 139 dim lett, nincs NaN/Inf.
+
+### Miért NEM kész még
+
+- A feldolgozott képek között jelentős számú hibás vagy pontatlan `fretboard` detektálás található; ezek rontják az automatikus feature-extrahálás minőségét és a downstream modell-tréninget.
+- Konkrétan: sok kép esetén a bundvonalak rosszul detektálódnak vagy a homográfia túl nagy hibát tartalmaz (alacsony `bund_det_rate` vagy `H_valid==0`).
+
+### Következő lépések (röviden)
+
+1. Diagnosztika futtatása: exportálom a gyenge detekciójú képek listáját (alacsony `bund_det_rate`, `H_valid==0`).
+2. Triage: csoportosítás ok szerint (pl. részben vágott fogólap, tükröződés, képtorzulás, rossz Hough-paraméterek). 
+3. Finomhangolás: szigorítás/ellazítás Hough küszöbök, per-sample confidence küszöb bevezetése, és szükség esetén fallback-szabályok javítása.
+4. Újra futtatás és validáció, majd Journal lezárása.
+
+### Megjegyzés
+- A teendőlista frissítve: diagnosztika folyamatban (lásd TODO-lista). Nem zárom le a Journal-t addig, amíg a hibák triage/korrekciója nem történik meg.
+
+
+---
+
 ## 🗓️ 2026-05-12 – Preprocessing fázis (`03_preprocessing.ipynb`)
 
 ### Elvégzett műveletek
