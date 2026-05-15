@@ -1,0 +1,69 @@
+Annyi hiányzik, hogy a gitár fogólap/fretboard ikonikus featureit megkeressük és pontosan ráillesszük a fogólap modelljét.
+Az alábbiakban leírtam részletesen, hogy miket kell figyelni a fogólap esetén, a fogólap segítségével megmondható a nyak iránya is, valamint, hogy az ujjak melyik bundon vannak elhelyezve.
+A detektálás során a kis részletek csak extra segítségként szolgáljanak, viszont ezeket is szeretném belevenni a feature-ökbe.
+Azért nem mondjuk a jelölések alapján akarok fontos döntést hozni, mivel vannak gyrátók, akik a teljes fogólapot kidíszítik ezekkel az inlayekkel
+Egy gitár fogólapjának megtervezése nem csupán asztalosmunka, hanem kőkemény matematika és akusztika. Ha egy **24 bundos (2 oktávos)** fogólapot nézünk, a precizitás kulcsfontosságú, hiszen milliméternyi tévedések is hamis hangzást eredményezhetnek.
+Íme a részletes lebontás:
+---
+## 1. A matematikai alap: A „18-as szabály”
+A bundok közötti távolság nem találomra csökken; egy mértani sorozatot követnek. A cél az, hogy a húr rezgő hosszát minden bundnál úgy rövidítsük le, hogy a frekvencia egy félhanggal emelkedjen.
+A gitárépítésben használt állandó a **17,817**.
+### A számítás menete:
+Minden egyes bund távolságát az aktuális „maradék” húrhossz alapján számoljuk ki.
+Legyen $L$ a menzúra (a húr teljes hossza a nyereg és a híd között).
+1. **Az első bund távolsága a nyeregtől:** $d_1 = L / 17,817$
+2. **A második bund távolsága az elsőtől:** A maradék hosszat ($L - d_1$) osztjuk el újra 17,817-tel.
+**A képlet általánosan:**
+A $n$-edik bund távolsága az előzőtől:
+$$d_n = \frac{L_{maradék}}{17,817}$$
+**Az arány:** Minden egyes köz (bundköz) szélessége az előzőnek kb. **94,38%-a**. Ez biztosítja, hogy a 12. bundnál pont a menzúra felénél járjunk, ami pontosan egy oktávot eredményez.
+---
+## 2. A bundok közötti jelölések (Pozíciójelzők)
+A gitárosok tájékozódását segítő pontok (inlay-k) elhelyezése standardizált, de a 24 bundos nyaknál az oktáv után ismétlődik a minta.
+| Bund sorszáma | Jelölés típusa | Megjegyzés |
+| --- | --- | --- |
+| **3.** | Egy pont | Az első támpont. |
+| **5.** | Egy pont | Gyakori alaphelyzet. |
+| **7.** | Egy pont | Domináns kvint pozíció. |
+| **9.** | Egy pont |  |
+| **12.** | **Két pont** | **Az 1. oktáv (a menzúra fele).** |
+| **15.** | Egy pont | A 3. bund + egy oktáv. |
+| **17.** | Egy pont | Az 5. bund + egy oktáv. |
+| **19.** | Egy pont | A 7. bund + egy oktáv. |
+| **21.** | Egy pont | A 9. bund + egy oktáv. |
+| **24.** | **Két pont** | **A 2. oktáv (a menzúra negyede).** |
+*Megjegyzés: Bizonyos gyártók az 1. bundhoz is tesznek jelölést, de a klasszikus elosztás a 3. bundnál kezdődik.*
+---
+## 3. Fizikai felépítés és geometria
+A fogólap nem egy sima téglalap, hanem több irányból is aszimmetrikus:
+* **Szélesség (Nuttól a test felé):** A fogólap a nyeregnél (Nut) a legkeskenyebb (kb. 42-43 mm) és a test felé haladva folyamatosan szélesedik (52-57 mm-ig), hogy kényelmes helyet biztosítson a pengető kéznek.
+* **Rádiusz (Görbület):** A fogólap keresztmetszete nem lapos, hanem domború. Ez segíti az akkordfogást és a kényelmes játékot. Minél kisebb a rádiusz (pl. 7.25" - Vintage Fender), annál domborúbb; minél nagyobb (pl. 16" - Ibanez), annál laposabb, ami a gyors szólózáshoz ideális.
+* **Vastagság:** A nyak profilja (C, U, V vagy D alak) változó, de a fogólap maga általában egyenletes, 5-6 mm vastag faanyag (rózsafa, ében vagy jávor).
+---
+## 4. Miért csökken a távolság?
+Ez a fizika rendje: ahogy rövidül a húr, ugyanahhoz a hangmagasság-emelkedéshez (félhanghoz) egyre kisebb százalékos rövidítésre van szükség a teljes hosszból.
+> **Gyakorlati példa:** Ha egy 648 mm-es (25.5") menzúrájú gitáron játszol, az 1. és 2. bund közötti távolság kb. **36 mm**, míg a 23. és 24. bund között már csak kb. **10 mm** a hely. Ezért van az, hogy a 2 oktávos gitárokon a legmagasabb fekvésekben már „sebészi” pontosságú ujjtechnika kell, mert nagyon összeszűkülnek a közök.
+A gitár fogólapja nemcsak egy matematikai rács, hanem a hangszer „arca” is. A berakások (angolul inlay) eredetileg a tájékozódást szolgálták, de mára a márkák védjegyévé és művészeti önkifejezéssé váltak.
+Nézzük a leggyakoribb és legikonikusabb díszítéseket, a puritántól az egészen extravagánsig:
+1. Geometriai alapformák (A klasszikusok)
+Pontok (Dots): A legegyszerűbb és legelterjedtebb megoldás. Általában műanyagból, gyöngyházból vagy fából készülnek. Szinte minden Fender modellen és belépő szintű gitáron ez az alap.
+Blokkok (Blocks): Nagy, téglalap alakú berakások, amelyek szinte kitöltik a két bund közötti helyet. Leggyakrabban a Gibson Les Paul Custom vagy a magasabb kategóriás Jazzmaster gitárokon látni. Tekintélyt parancsoló, „luxus” megjelenést kölcsönöz.
+Trapézok (Trapezoids): A Gibson Les Paul Standard gitárok ikonikus ismertetőjele. Elegáns, a nyak szélesedésével együtt változik a méretük.
+Split-Parallelogram (Osztott paralelogramma): Olyan, mintha egy blokkot középen átvágtak volna. Gyakori a Gibson ES-335-ösökön vagy az Epiphone egyes modelljein.
+Gyémánt (Diamond/Snowflake): Kisebb, rombusz alakú díszítések, amik gyakran vintage akusztikus gitárokon (pl. Martin) vagy "V" alakú elektromos gitárokon fordulnak elő.
+2. Márkaspecifikus és ikonikus díszítések
+Vannak olyan minták, amikről messziről megmondható, milyen márkájú gitárt tart a zenész:
+Madarak (Birds): Ez a PRS (Paul Reed Smith) gitárok abszolút védjegye. A 24 bundos nyakon minden egyes pozíciójelzőnél egy-egy különböző madárfaj látható repülés közben (pl. vándorsólyom, mocsári rétihéj, ökörszem).
+Cápauszony (Sharkfin): A Jackson gitárok agresszív, háromszög alakú berakásai, amik a „metálgitár” arculat alapkövei.
+Életfa (Tree of Life): Az Ibanez JEM (Steve Vai szériája) gitárok dísze. Ez egy indaszerű minta, ami végigfut az egész fogólapon, összekötve a bundokat. Gyönyörű, de néha nehéz rajta tájékozódni a sok kacskaringó miatt.
+Keresztek (Crosses): A Schecter gitárok (különösen a Tony Iommi vagy gothic modellek) gyakran használnak gótikus kereszt mintákat.
+3. Különleges anyagok és technológiák
+Nemcsak a forma, hanem az anyag is számít:
+Mother of Pearl (Gyöngyház): Fehéres, irizáló anyag, amit valódi kagylóhéjból nyernek. Klasszikus és drága.
+Abalone (Tengeri fülcsiga): Sötétebb, kékes-zöldes-lilás árnyalatú, nagyon látványos kagylóhéj.
+Pearloid: A gyöngyház műanyag utánzata. Tartós, olcsóbb, és messziről szinte megkülönböztethetetlen az eredetitől.
+Luminlay (Világító pontok): Olyan speciális anyag, ami „feltöltődik” a fénnyel, és a sötét színpadon fluoreszkálva világít. Ez a gitárosok legjobb barátja egy sötét klubban.
+Fa a fában: Például sötét ébenfa fogólapba juharfából készült berakások. Ez letisztult, organikus hatást kelt.
+4. Az „oldalsó” pontok (Side Dots)
+Bármilyen díszes is a fogólap eleje, a gitáros játék közben leginkább a nyak élén lévő apró pontokat látja. Ezek kritikus fontosságúak a tájékozódáshoz, és szinte kivétel nélkül minden gitáron ott vannak, még akkor is, ha a fogólap eleje teljesen üres (mint sok modern metálgitáron).
+Érdekesség: Vannak gitárok, ahol egyáltalán nincs elöl jelölés (úgynevezett „clean” fogólap). Ez professzionális, minimalista megjelenést ad, feltételezve, hogy a zenész már vakon is tudja, hol tart.
