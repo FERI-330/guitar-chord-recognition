@@ -1,0 +1,50 @@
+fname,class,split,reason
+IMG_20251102_024030_1.jpg,C,test,trapezoid_sanity: aspect 3.28<4.0
+IMG_20251102_024035.jpg,C,test,trapezoid_sanity: aspect 3.99<4.0
+1762212432976.jpg,D,test,no_hough_lines
+IMG_20251102_023649.jpg,E,test,trapezoid_sanity: aspect 3.97<4.0
+1762212513538.jpg,F,test,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+1762212513752.jpg,F,test,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+1762212557971.jpg,G,test,"trapezoid_sanity: area_frac 0.008 ∉ (0.01, 0.5)"
+1762212326034.jpg,A,train,"trapezoid_sanity: area_frac 0.006 ∉ (0.01, 0.5)"
+1762212326103.jpg,A,train,"trapezoid_sanity: area_frac 0.007 ∉ (0.01, 0.5)"
+1762212326133.jpg,A,train,"trapezoid_sanity: area_frac 0.009 ∉ (0.01, 0.5)"
+1762212326173.jpg,A,train,trapezoid_sanity: aspect 3.53<4.0
+1762212326193.jpg,A,train,trapezoid_sanity: aspect 2.91<4.0
+1762212326347.jpg,A,train,trapezoid_sanity: aspect 1.26<4.0
+1762212326435.jpg,A,train,trapezoid_sanity: aspect 1.19<4.0
+IMG_20251102_023849.jpg,A,train,"trapezoid_sanity: area_frac 0.009 ∉ (0.01, 0.5)"
+1762212394873.jpg,C,train,trapezoid_sanity: aspect 3.41<4.0
+1762212394923.jpg,C,train,trapezoid_sanity: aspect 3.66<4.0
+1762212395008.jpg,C,train,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+1762212395075.jpg,C,train,trapezoid_sanity: aspect 2.84<4.0
+IMG_20251102_024026.jpg,C,train,"trapezoid_sanity: area_frac 0.005 ∉ (0.01, 0.5)"
+IMG_20251102_024028_1.jpg,C,train,trapezoid_sanity: aspect 2.00<4.0
+IMG_20251102_024031_1.jpg,C,train,"trapezoid_sanity: area_frac 0.004 ∉ (0.01, 0.5)"
+1762212432956.jpg,D,train,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+1762212432998.jpg,D,train,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+1762212433074.jpg,D,train,trapezoid_sanity: aspect 3.43<4.0
+1762212433109.jpg,D,train,trapezoid_sanity: aspect 3.02<4.0
+1762212477764.jpg,E,train,trapezoid_sanity: aspect 1.35<4.0
+1762212477948.jpg,E,train,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+1762212477965.jpg,E,train,"trapezoid_sanity: area_frac 0.003 ∉ (0.01, 0.5)"
+1762212478017.jpg,E,train,no_hough_lines
+1762212478036.jpg,E,train,no_hough_lines
+1762212513882.jpg,F,train,"trapezoid_sanity: area_frac 0.006 ∉ (0.01, 0.5)"
+1762212513914.jpg,F,train,"trapezoid_sanity: area_frac 0.005 ∉ (0.01, 0.5)"
+1762212513965.jpg,F,train,trapezoid_sanity: aspect 1.85<4.0
+1762212514005.jpg,F,train,trapezoid_sanity: aspect 2.13<4.0
+IMG_20251102_023913.jpg,F,train,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+IMG_20251102_023915.jpg,F,train,trapezoid_sanity: aspect 1.43<4.0
+IMG_20251102_023918_1.jpg,F,train,trapezoid_sanity: aspect 3.10<4.0
+1762212557881.jpg,G,train,trapezoid_sanity: aspect 1.41<4.0
+1762212557906.jpg,G,train,trapezoid_sanity: aspect 1.14<4.0
+1762212558114.jpg,G,train,"trapezoid_sanity: area_frac 0.001 ∉ (0.01, 0.5)"
+1762212558132.jpg,G,train,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"
+1762212558165.jpg,G,train,trapezoid_sanity: aspect 1.27<4.0
+1762212558182.jpg,G,train,trapezoid_sanity: aspect 1.57<4.0
+_storage_emulated_0_Android_data_com.miui.gallery_cache_SecurityShare_1762212557598.jpg,G,train,trapezoid_sanity: aspect 2.90<4.0
+IMG_20251102_023812.jpg,No hand,train,trapezoid_sanity: aspect 3.22<4.0
+IMG_20251102_023850_1.jpg,A,val,"trapezoid_sanity: area_frac 0.006 ∉ (0.01, 0.5)"
+1762212477705.jpg,E,val,trapezoid_sanity: aspect 2.24<4.0
+1762212558073.jpg,G,val,"trapezoid_sanity: area_frac 0.000 ∉ (0.01, 0.5)"

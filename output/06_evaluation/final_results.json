@@ -1,0 +1,8 @@
+{
+  "ml_model": "SVM (Group B, 42d)",
+  "ml_test_acc": 0.9111111111111111,
+  "ml_test_f1": 0.9073779290884554,
+  "cnn_model": "MobileNetV3-Large",
+  "cnn_test_acc": 0.9777777777777777,
+  "cnn_test_f1": 0.9777777777777779
+}

@@ -1,0 +1,6 @@
+{
+  "best_cnn_name": "MobileNetV3-Large",
+  "best_cnn_ckpt": "/data/Tanulm\u00e1nyok/K\u00e9pfeldolgoz\u00e1s alap algoritmusai/F\u00e9l\u00e9ves feladat/guitar-chord-recognition/checkpoints/best_mobilenet_v3_large_phB.pth",
+  "best_cnn_val_acc": 0.9555555555555556,
+  "svm_val_acc": 0.956
+}

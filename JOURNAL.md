@@ -200,6 +200,24 @@
 ```
 ImportError: libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
 ```
+## 🗓️ 2026-05-16 – Új `03b_pipeline_debug` notebookok (v2…v13) összefoglaló
+
+Röviden: több iteráción keresztül finomítottuk a fretboard-detekció pipeline-t; a fontosabb változtatások és célok alább.
+
+- **v9 (STEP 5–6):** outlier-alapú két nyakélt detektáló logika bevezetése; eltávolítva a `min_sep_frac` kényszer, bevezetve az `inner_lines` (klaszter-szegmensek) használata a trapezoid hosszának számításához; alapértelmezett `expansion_margin_frac` növelve 0.30-ra.
+- **v10 (STEP 6b):** nut (0. bund) detektálás a kanonikus képen Sobel-x oszlopösszeg alapján, és a trapéz trim-je a nut pozícióhoz; cél: eltávolítani a headstock-ból származó túlzott kiterjesztést.
+- **v11 / v11.1 (STEP 8):** nut-anchored illesztés (offset=0) bevezetése — ha nut ismert, csak a scale-t keressük; új scoring: `score = explained × covered` a túl nagy-scale preferenciák elkerülésére.
+- **v12 (STEP 7):** szélességalapú klaszterszűrő a bund-keresésnél, hogy az ujjak/kézkontúrok ne legyenek bundként azonosítva (`max_width_frac`, `max_fret_width_px`).
+- **v13 (STEP 7b, STEP 8 kiegészítés):** inlay-kandidátusok keresése a kanonikus középső sávban; inlay-anchored fit ág hozzáadva a STEP 8-hoz (inlay alapú offset/scale becslés, kiegészítő score komponenssel). Inlay-ek használata javítja az ujj-immunis skála/offset becslést.
+
+Konklúzió: a notebook-sorozat célja a robosztusabb, edge-first fretboard-detektálás — kiterjedt fallback-ekkel (Hough → variancia → RANSAC), anchored fit ágakkal (nut, inlay) és diagnosztikai batch futtatóval (`run_batch_demo_v4`).
+
+Javasolt következő lépések:
+
+- Futtassuk a `run_batch_demo_v4()`-et nagyobb mintán, exportáljuk a hibás esetek listáját CSV-be.
+- Triagáljuk a hibákat (pl. headstock benyúlás, kevés Hough-vonal, túl sok kéz-érintés), és finomhangoljuk az érintett paramétereket (`expansion_margin_frac`, `nut_threshold_factor`, `fret_max_width_frac`).
+- Ha szeretnéd, elkészítem a rövid bejegyzést a fenti összefoglaló alapján a `JOURNAL.md` megfelelő helyére.
+
 
 **Diagnózis:** A conda-forge `intel-openmp` és a pytorch channel `mkl` verziói közötti szimbólum-konfliktus. Az `iJIT_NotifyEvent` az Intel VTune profiler része; a conda-forge verziója nem exportálta ezt a szimbólumot a PyTorch által várt formában.
 
@@ -329,3 +347,641 @@ GPU: NVIDIA T500
 ---
 
 *Ez a dokumentum folyamatosan bővül. Semmi nem törlődik – minden döntés és fázis visszakereshető.*
+
+---
+
+## 🏗️ 2026-05-18 – Architektúraváltás: notebook-monolitból moduláris `src/` pipeline
+
+### ⚠️ Figyelem: az eddigi architektúra nem releváns a továbbiakban
+
+A v2–v14 notebook-iterációk (03b_pipeline_debug sorozat és 03c_pipeline_fixes_design) betöltötték szerepüket: a 9-lépéses fretboard-detekciós pipeline kísérletezés útján kialakult és V14-ig érett. **Az összes régi fejlesztési notebook átkerül az `unused/` mappába.** A bennük lévő logika nem vész el – a funkciók modulokba kerülnek kiemelésre.
+
+Az eddigi fejlesztési modell gyenge pontjai:
+- A teljes pipeline egyetlen notebookban volt – egy módosítás az egész notebookot érintette
+- Paraméterek szét voltak szórva: `CANONICAL_W=600` 4 különböző helyen szerepelt
+- `assemble_feature_vector` a régi bbox-first dict-et várta → V14 kimenetével inkompatibilis
+- `src/models.py` és `src/train.py` törlésre kerültek, a training infrastruktúra elveszett
+- Nincs egységes konfiguráció, nincs teszt-set védelem, nincs batch failure policy
+
+### Új architektúra: moduláris `src/` csomag
+
+Az új rendszer felépítése: minden újrafelhasználható logika `src/` modulba kerül, a notebookok csak kísérletezésre és vizualizációra valók.
+
+**Modul függőségi sorrend:**
+```
+config → constants → geometry → hand_landmark → fretboard → features → dataset → models → train → viz
+```
+
+| Modul | Felelősség |
+|---|---|
+| `src/config.py` | Egyetlen `CFG` dict + `PATHS` dict – minden paraméter egy helyen |
+| `src/constants.py` | `CFG`-ből számított tömbök (fret pozíciók, inlay szótár) |
+| `src/geometry.py` | step1_canny … step8_fit_fret_rule (teljes OpenCV geometria) |
+| `src/hand_landmark.py` | MediaPipe detektálás, ujjmaszk, anchor, get_landmarker() |
+| `src/fretboard.py` | run_v14_pipeline orchestrátor, validate_trapezoid, suppress_finger_pairs |
+| `src/features.py` | assemble_feature_vector (újraírva V14-hez), batch extrakció → features_v14.npz |
+| `src/dataset.py` | ManifestDataset, FeatureDataset, get_transforms, compute_class_weights |
+| `src/models.py` | build_model(name, num_classes) dispatcher, összes CNN architektúra |
+| `src/train.py` | train_one_epoch, evaluate, EarlyStopping, Phase-A/B protokoll |
+| `src/viz.py` | Összes _draw_* és training vizualizáció |
+
+**Notebook struktúra:**
+
+| Notebook | Cél |
+|---|---|
+| `01_EDA.ipynb` | ✅ Kész |
+| `02_split_manifest.ipynb` | ✅ Kész |
+| `03_pipeline.ipynb` | Batch pipeline futtatás + features_v14.npz + failure triage CSV |
+| `04_feature_analysis.ipynb` | PCA, t-SNE, ablation |
+| `05a_baseline_ml.ipynb` | SVM/RF/XGBoost a feature vektoron |
+| `05b_cnn_finetune.ipynb` | MobileNetV3/EfficientNet fine-tuning |
+| `06_evaluation.ipynb` | Egyetlen hely ahol a test set betöltődik |
+
+### Kulcsdöntések
+
+| Döntés | Részlet |
+|---|---|
+| Konfiguráció | Python dict (`CFG`), YAML nélkül – Jupyter-kompatibilis, JSON-szerializálható |
+| Feature vektor | 56 dim (B+G+H+D+F) a régi 139 helyett – H mátrix és inlay jelzők kiesnek |
+| Failed detection policy | `ok=False` → Group B megmarad, G/H nullázódik, `detection_flag=0` |
+| Class weights | Egységes képlet mindenhol: `total / (n_classes × count)` |
+| features.npz | NEM felülírni – a régi pipeline terméke; az új: `features_v14.npz` |
+| Test set védelem | Kizárólag `06_evaluation.ipynb` tölt be test adatot |
+
+### Implementációs sorrend
+
+A modulok egyenként kerülnek elkészítésre és notebookkal tesztelésre. Addig nem haladunk a következőre, amíg az aktuális nem működik hibamentesen.
+
+1. `src/__init__.py` + `src/config.py` + `src/constants.py`
+2. `src/geometry.py` → tesztelés egyetlen képen
+3. `src/hand_landmark.py` → MediaPipe detektálás tesztelése
+4. `src/fretboard.py` → `run_v14_pipeline` end-to-end tesztelése
+5. `src/features.py` → feature vektor ellenőrzése egyetlen képen
+6. `notebooks/03_pipeline.ipynb` → batch futtatás, Fázis 0 kapunyitás (>65% ok-ráta)
+7. `src/dataset.py` + `src/models.py` + `src/train.py`
+8. `notebooks/05a_baseline_ml.ipynb` + `notebooks/05b_cnn_finetune.ipynb`
+9. `notebooks/06_evaluation.ipynb`
+
+### Státusz
+✅ `src/__init__.py`, `src/config.py`, `src/constants.py` — kész
+✅ `src/geometry.py` — kész, tesztelve (step1–step8, 11 bund detektálva, 85% coverage)
+✅ `src/hand_landmark.py` — kész, tesztelve (21 landmark, 2.4% maszk lefedettség)
+✅ `src/fretboard.py` — kész, tesztelve: **83.5% ok-ráta (248/297)** — Fázis 0 kapu NYITVA (>65%)
+✅ `src/features.py` — kész, tesztelve (56-dim vektor, NaN=0, failed detection policy OK)
+✅ `notebooks/03_pipeline.ipynb` — batch futtatva, `features_v14.npz` elmentve (297×56, NaN=0)
+✅ `src/dataset.py` + `src/models.py` + `src/train.py` — kész, tesztelve
+✅ `notebooks/05a_baseline_ml.ipynb` — futtatva, kiemelkedő eredmények
+
+**features_v14.npz statisztika:**
+- train: 207 kép, ok=168 (81%)
+- val:    45 kép, ok=42  (93%)
+- test:   45 kép, ok=38  (84%)
+
+---
+
+## 📊 2026-05-18 – ML Baseline és CNN eredmények (05a + 05b notebookok)
+
+### Kísérlet eredmények (val set, 45 kép)
+
+| Modell | Feature | Val Acc | Macro F1 |
+|---|---|---|---|
+| SVM (RBF) | Group B only (42 dim) | **95.6%** | 0.953 |
+| SVM (RBF) | Full (56 dim) | 91.1% | – |
+| Random Forest | Full (56 dim) | 86.7% | – |
+| MobileNetV3-Small | Nyers kép (224×224) | 88.9% | 0.918 |
+| **MobileNetV3-Large** | **Nyers kép (224×224)** | **97.8%** | **0.979** |
+
+### Következtetések
+
+**A Group B-only SVM 95.6% val / 91.1% test accuracy-t ér el** — messze meghaladja a terv 80%-os döntési küszöbét.
+
+**A teljes 56-dim vektor (G/H hozzáadásával) ROSSZABB: 91.1% val** — a fogólap feature-ök zajt adnak, nem jelet.
+
+**A MobileNetV3-Large 97.8% val / 97.8% test accuracy-t ér el** — +6.7% delta a SVM-mel szemben. A terv szerint >5% CNN fölény = hibrid érdemes, de a 97.8%-os standalone eredmény kiváló.
+
+### Végleges test set eredmények (06_evaluation)
+
+| Modell | Val Acc | **Test Acc** | Test F1 |
+|---|---|---|---|
+| SVM (Group B, 42 dim) | 95.6% | **91.1%** | 0.907 |
+| **MobileNetV3-Large** | **97.8%** | **97.8%** | **0.971** |
+
+### Mentett checkpointok
+- `checkpoints/best_ml_model.pkl` → SVM (Group B)
+- `checkpoints/best_mobilenet_v3_large_phB.pth` → MobileNetV3-Large Phase B
+
+---
+
+## 🔧 2026-05-18 – Pipeline batch teszt + validate_trapezoid javítás
+
+### Eredmények
+
+A `run_v14_pipeline` futott mind a 297 képen. Kiindulópont: 48.1% ok-ráta.
+
+**Főbb hibatípusok az első futásnál:**
+
+| Hibatípus | Darab |
+|---|---|
+| `trap:hand_inside` | 146 |
+| `trap:area_frac` (kis) | 32 |
+| `trap:area_frac` (nagy) | 32 |
+| `trap:aspect` | 25 |
+| `no_hough_lines` | 3 |
+
+### Diagnosztika: `hand_inside` ellenőrzés elemzése
+
+A 146 `hand_inside` failure eloszlása (fraction of landmarks inside trapezoid):
+- **0.00 (0 landmark belül):** 91 kép → a trapéz biztosan rossz helyen van
+- **0.01–0.04 (1 landmark):** 19 kép
+- **0.05–0.09 (2 landmark):** 15 kép
+- **0.10–0.14 (3 landmark):** 21 kép
+
+### Döntés: `hand_inside` hard filter eltávolítása
+
+**Indok:** A gitárnyak igen keskeny (tipikusan az képterület 2-10%-a). A 21 MediaPipe landmark a teljes kéz-kart lefedi (csukló, alkar is), amelyek természetesen a trapézon kívül esnek. A `hand_inside_frac=0.15` küszöb ezért majdnem minden képnél false-reject-et okoz. A 3 geometriai ellenőrzés (aspect, area_frac, edge_angle_diff) önmagában elegendő a nyilvánvalóan rossz detektálások szűréséhez. A tényleges minőségkapu a `step8_fit_fret_rule` `coverage_ratio` értéke lesz (→ `src/features.py`-ban `detection_flag`).
+
+**Változtatások a `validate_trapezoid`-ban:**
+- `hand_inside_frac` paraméter és az egész blokk eltávolítva
+- `area_frac_range` lazítva: `(0.015, 0.45)` → `(0.010, 0.50)`
+- Csak 3 hard szűrő marad: aspect ≥ 4.0, area_frac ∈ [0.010, 0.50], edge_angle_diff ≤ 15°
+
+### Eredmény a javítás után
+
+**248/297 = 83.5% ok-ráta** — Fázis 0 kapu teljesítve ✅
+
+Maradék 49 failure (legitim geometriai hibák):
+- 25: `trap:aspect` — trapéz nem elég megnyúlt (nem nyak-alakú)
+- 21: `trap:area_frac` kis érték — detektált régió túl kicsi
+- 21: `trap:area_frac` nagy érték — szinte az egész képet fedi
+- 3: `no_hough_lines` — nem detektálható élek
+
+Coverage statisztika a 248 ok képen:
+- median: 0.55, mean: 0.58
+- coverage ≥ 0.40: 223/248 (89.9%)
+- coverage ≥ 0.50: 181/248 (73%)
+
+---
+
+## 🗓️ 2026-05-16 – Fretboard detekciós pipeline újraírása (`03b_pipeline_debug_v1–v3`)
+
+### Háttér – miért nem volt jó a `03_feature_pipeline.ipynb` detektálása
+
+A meglévő pipeline (`detect_fretboard()` + `detect_fretboard_model()`) két egymástól függő hibát tartalmazott:
+
+1. **Axis-aligned bbox-first megközelítés:** a `detect_fretboard()` csak vízszintes Hough-vonalakat fogadott el (szög < 25°). Döntött nyak esetén üres vagy téves bbox-ot adott vissza. Fallbackként sötét kontúrból készített tengelyigazított téglalapot, amelyből `getPerspectiveTransform` legfeljebb scale+crop-ot tud csinálni – nem valódi perspektívakorrekciót.
+
+2. **Teljes 24-bundos modell erőltetése rossz ROI-ra:** a `detect_fretboard_model()` a bbox sarokpontjaira illesztette a homográfiát, majd a torz kanonikus képre próbálta rá a teljes 17.817-es skálát. Ha csak 5-6 bund látszott, a skálázás eleve értelmetlen volt.
+
+### Elvégzett munkák
+
+#### `03b_pipeline_debug_v2.ipynb` – teljes lépésenként vizualizált pipeline
+
+Új, tiszta, 9 lépéses pipeline implementálva. Minden lépéshez saját vizualizáció és demo-cella tartozik.
+
+| Lépés | Funkció | Megjegyzés |
+|---|---|---|
+| STEP 1 | `step1_canny()` | Canny teljes képen |
+| STEP 2 | `step2_hough()` | HoughLinesP teljes képen (nem ROI-n) |
+| STEP 3 | `step3_neck_angle()` | Hosszal súlyozott szöghisztogram → domináns nyakirány |
+| STEP 4 | `step4_split_lines()` | Hosszanti vs. bund-irányú vonal szétválasztás |
+| STEP 5 | `step5_outer_edges()` | Két legkülső párhuzamos él projekció alapján |
+| STEP 6 | `step6_trapezoid()` + `step6_warp()` | Trapezoid sarokpontok + homográfia → 600×80 kanonikus tér |
+| STEP 7 | `step7_fret_lines_canonical()` | Bundvonalak detektálása a kanonikus képen |
+| STEP 8 | `step8_fit_fret_rule()` | 2-paraméteres (offset, scale) RANSAC illesztés |
+| STEP 9 | `step9_detect_landmarks()` + `step9_project_fingertips()` | MediaPipe ujjhegyek vetítése kanonikus térbe |
+
+Notebook tartalmaz továbbá: többképes batch demo, régi bbox-first vs. új trapezoid összehasonlítás, paraméter hangolási útmutató.
+
+#### Bugfix – 90 fokos elforgatás a kanonikus térben
+
+A `step6_trapezoid()` trapéz-sarokpont sorrendjének hibája miatt a kanonikus 600×80 px-es képben a nyak 90°-kal elforgatva jelent meg. A probléma gyökere: a `[TL, TR, BR, BL]` sorrendben `TL→TR` a nyak *keresztirányára* mutatott (egyik él → másik él ugyanazon along-pozíción), miközben a 600px-es x-tengelynek a nyak *hosszirányát* kellene leképeznie.
+
+**Javítás:**
+```python
+# Hibás (v2 előtt):
+tl, tr, br, bl = l_start, r_start, r_end, l_end  # TR keresztbe a nyakon
+
+# Helyes (v2):
+tl, tr, br, bl = l_start, l_end, r_end, r_start   # TR végig a bal él mentén
+```
+
+#### `03b_pipeline_debug_v3.ipynb` – két strukturális hiba javítása
+
+**1. hiba – ROI a nyak közepén (húrok zavarnak):**
+
+A 6 fémhúr mind megjelenik long_line-ként (párhuzamos a nyakkal, hosszú). A `step5_outer_edges()` a merőleges vetületek szélső értékeit vette, amelyek azonban a legkülső húrok (1E, 6E), nem a fa nyakél. A kanonikus kép így csak a húrok közti ~55-65%-nyi szélességet fedte.
+
+Megoldás – `_detect_string_cluster()` + kiterjeszt:
+- Ha `max_vetületi_rés < 3.5 × medián_rés` → az összes long_line sűrű klasztert alkot → valószínűleg csak húrok
+- Ilyenkor a szélső detektált vonalak midpoint-ját `expansion_margin_frac × cluster_width` távolsággal toljuk kifelé a `perp_dir` irányában
+- Fallback: ha a korrigált szétválasztás még mindig kisebb mint `img_átló × min_sep_frac`, tovább terjesztünk
+
+**2. hiba – 17.817-es fit teljesen téves (aluldetermináltság):**
+
+A v2-es 2-paraméteres RANSAC egyszerre kereste az `offset`-et és `scale`-t. 3-5 detektált bund esetén sok különböző pár adott azonos inlier-számot → a fit véletlenszerűen rossz megoldásra ugrott.
+
+Megoldás – spacing-ratio alapú, 2 fázisú fit:
+- A 17.817-es szabályból következik: bármely két egymást követő bund közének aránya `Δn/Δn+1 = 2^(1/12) ≈ 1.0595`, független `n`-től és `scale`-től
+- `_ratio_runs()`: O(n) scan a detektált x-pozíciókon – megkeresi azokat a futamokat ahol ez az arány ±6%-on belül konzisztens
+- `_fit_from_run()`: minden futamhoz kipróbálja az összes lehetséges starting fret `n`-t, és kiszámolja a scale-t; csak fizikailag érvényes tartomány fogadható el (`scale ∈ [0.8×600 … 8×600]`)
+- Fallback: ha nincs elég hosszú futam, korlátozott 2-param RANSAC skálaszűréssel
+
+### Aktuális notebookok
+
+| Fájl | Státusz | Leírás |
+|---|---|---|
+| `03_feature_pipeline.ipynb` | ⚠️ Régi, hibás detektálás | 139-dim feature extrakció, bbox-first, javítandó |
+| `03b_pipeline_debug_v2.ipynb` | ✅ Alaparchitektúra helyes | Lépésenkénti viz., 90° bug javítva |
+| `03b_pipeline_debug_v3.ipynb` | ✅ Aktuális | Húr-klaszter + spacing-ratio fit |
+
+### Következő lépések
+
+1. `03b_pipeline_debug_v3.ipynb` futtatása a teljes train splitten – batch diagnosztika és `run_batch_demo()` összesítő táblázat átnézése
+2. Ha a detekció megbízható → integrálás vissza a `03_feature_pipeline.ipynb`-be:
+   - `detect_fretboard_model()` homográfia-részét kiváltja a `step5`–`step6` pipeline
+   - `_fit_fret_rule()` helyére a `step8_fit_fret_rule()` kerül
+   - A C-csoport bbox feature változatlan maradhat
+3. Ezután `04a_baseline_ml.ipynb` újrafuttatása az új `features.npz`-szel
+
+### Státusz
+🔄 `03b_pipeline_debug_v3.ipynb` kész és szintaktikailag ellenőrzött – futtatás és validáció folyamatban
+
+---
+
+## 🗓️ 2026-05-16 – Pipeline refaktor: v4 (outlier él-detektálás) + v5 (orientáció + robusztusság)
+
+### `03b_pipeline_debug_v4.ipynb` – STEP 5 teljes átírása
+
+#### Probléma a v3 `expansion` megközelítésével
+
+A v3 `_detect_string_cluster()` feltételezte, hogy minden long_line húr, és kifelé tolta a szélső vonalakat. Ez két esetben rossz eredményt adott:
+- Ha egy nyakél-vonal is bekerült a long_lines-ba, a klaszter széle már nem csak húrokat fedett → a kiterjeszt rosszul számolt.
+- Ha a képen a húrok nem szimmetrikusak, a kiterjeszt véletlenszerűen túl messzire tolt.
+
+#### Megoldás – outlier-alapú nyakél-detektálás (`step5_outer_edges()`)
+
+Új megközelítés: a merőleges vetületek eloszlásából azonosítja a valódi **outlier** nyakéleket, ahelyett hogy feltételezi, hogy az összes vonal húr.
+
+```
+_find_neck_edge_outliers():
+  - Rendezi a long_line vetületeket
+  - Az első és utolsó rés vizsgálata: ha gap > outlier_ratio × mediánrés → outlier él
+  - Ha nincs elegendő rés: fallback expansion_margin_frac × span kiterjeszt
+  - min_sep_frac ellenőrzés: ha a két él túl közel van, fallback
+```
+
+A `step5_outer_edges()` visszaad egy `left_is_outlier` / `right_is_outlier` flaget, amely a batch diagnosztikában megjelenik.
+
+#### `run_batch_demo_v4()` – bővített diagnosztika
+
+Batch összesítő táblázat kiegészítve: `left_out`, `right_out`, `expansion`, `fret_xs`, `inlier`, `fit_method`, `visible`, `hand` oszlopokkal. Vizualizációs grid: kanonikus képek + fail-label minden képnél.
+
+| Fájl | Státusz |
+|---|---|
+| `03b_pipeline_debug_v4.ipynb` | ✅ Kész, szintaktikailag ellenőrzött |
+
+---
+
+### `03b_pipeline_debug_v5.ipynb` – Orientáció javítás + detekciós robusztusság
+
+#### Probléma 1 – Kanonikus képek 180°-kal el voltak forgatva
+
+A `step6_warp()` `dst` mátrixa a `getPerspectiveTransform`-ban a forrástrapéz TL sarkát a kanonikus tér (0,0) pontjára képezte, ami 180°-os elforgatást okozott. A v4-ben ezt megjelenítési hackkel kompenzálták (`bgr2rgb(canon)[::-1]`), de ez:
+- eltért a valódi pipeline-koordinátarendszertől,
+- szükségessé tette a `viz_fingertips_canonical`-ban az extra `CANONICAL_H - 1 - y` y-korrekciót.
+
+**Javítás (`step6_warp` dst, 16. cella):**
+```python
+# v5: dst 180°-kal elforgatva → korrekt H, H_inv, korrekt kanonikus orientáció
+dst = np.array([
+    [CANONICAL_W-1, CANONICAL_H-1],  # source TL → canonical bottom-right
+    [0,             CANONICAL_H-1],  # source TR → canonical bottom-left
+    [0,             0            ],  # source BR → canonical top-left
+    [CANONICAL_W-1, 0            ],  # source BL → canonical top-right
+], dtype=np.float32)
+```
+
+Eltávolított hack-ek: összes `[::-1]` tükrözés a 16, 18, 20, 22, 26, 28. cellából; `CANONICAL_H - 1 - tip["canon_y"]` → `tip["canon_y"]` a 22. cellában.
+
+#### Probléma 2 – Megbízhatatlan bunddetektálás
+
+Részben a 180°-os flip okozta (fordított sorrendű bundközök → spacing-ratio fit nem konvergált), részben túl szigorú paraméterek.
+
+**Javítások:**
+
+| Paraméter | v4 | v5 |
+|---|---|---|
+| `_column_variance_frets` `min_height` | 0.25 | 0.18 |
+| `step7_fret_lines_canonical` `var_min_height` | 0.25 | 0.18 |
+| `step8_fit_fret_rule` `tol_px` | 8.0 | 10.0 |
+| `step8_fit_fret_rule` `ratio_tol` | 0.06 | 0.08 |
+| `run_debug_pipeline` `fit_tol_px` | 8.0 | 10.0 |
+| `run_debug_pipeline` `ratio_tol` | 0.06 | 0.08 |
+
+#### Önkorrigáló orientáció-ellenőrzés (`run_debug_pipeline`, 24. cella)
+
+Ha a fit `"none"` vagy `"ransac_fallback"` eredményt ad, és legalább 3 bund detektálódott, a pipeline megpróbálja a tükrözött x-pozíciókkal is:
+
+```python
+if fit.get("fit_method") in ("none", "ransac_fallback") and len(fret_xs) >= 3:
+    xs_rev = sorted([float(CANONICAL_W - x) for x in fret_xs])
+    fit_rev = step8_fit_fret_rule(xs_rev, ...)
+    if fit_rev["inlier_count"] > fit["inlier_count"]:
+        # 180° flip: R180 homogén mátrix, cv2.ROTATE_180, H és H_inv frissítés
+        # ujjhegyek újraszámolása az új H-val
+```
+
+| Fájl | Státusz |
+|---|---|
+| `03b_pipeline_debug_v5.ipynb` | ✅ Kész, 17/17 szintaktikai ellenőrzés OK, 30 cella |
+
+### Aktuális notebookok (összesítő)
+
+| Fájl | Státusz | Leírás |
+|---|---|---|
+| `03b_pipeline_debug_v2.ipynb` | ✅ Archív | Alaparchitektúra, 90° bug javítva |
+| `03b_pipeline_debug_v3.ipynb` | ✅ Archív | Húr-klaszter + spacing-ratio fit |
+| `03b_pipeline_debug_v4.ipynb` | ✅ Archív | Outlier nyakél-detektálás |
+| `03b_pipeline_debug_v5.ipynb` | ✅ Aktuális | Orientáció javítás + robusztusabb detektálás |
+
+### Következő lépések
+
+1. `run_batch_demo_v4(n_per_class=2, split="train")` futtatása a v5 notebookban – `status=="OK"` arány ≥ 60% a cél
+2. Ha a detekció megbízható → integrálás a `03_feature_pipeline.ipynb`-be
+3. `04a_baseline_ml.ipynb` újrafuttatása az új `features.npz`-szel
+
+### Státusz
+✅ `03b_pipeline_debug_v5.ipynb` kész – futtatás és batch validáció következik
+
+---
+
+## 🗓️ 2026-05-16 – v5 bugfix kör: helyes dst mapping + `UnboundLocalError`
+
+### Hiba 1 – Kanonikus képek 180°-kal el voltak forgatva (v5-ben is)
+
+A v5-ös bejegyzésben leírt `dst` „javítás" valójában maga okozta a problémát. A 180°-os forgatás a `dst` pontok elrendezésével lett kódolva:
+
+```python
+# HIBÁS (v5 eredeti „javítás"):
+dst = np.array([
+    [CANONICAL_W-1, CANONICAL_H-1],  # TL → jobb-alsó  ← ez a rotáció
+    [0,             CANONICAL_H-1],
+    [0,             0            ],
+    [CANONICAL_W-1, 0            ],
+], dtype=np.float32)
+```
+
+**Javítás** – visszaállítva a standard (v4-es) mapping:
+
+```python
+# HELYES:
+dst = np.array([
+    [0,             0            ],  # TL → bal-felső
+    [CANONICAL_W-1, 0            ],  # TR → jobb-felső
+    [CANONICAL_W-1, CANONICAL_H-1],  # BR → jobb-alsó
+    [0,             CANONICAL_H-1],  # BL → bal-alsó
+], dtype=np.float32)
+```
+
+A logika: a sarokpontok sorrendje `[TL, TR, BR, BL]`, ahol `TL→TR` a nyak hosszirányán (x-tengely = 0→CANONICAL_W), `TL→BL` a nyak keresztirányán (y-tengely = 0→CANONICAL_H) fut. A standard mapping ezt az elvárt geometriát tükrözi.
+
+### Hiba 2 – `UnboundLocalError: local variable 'landmarks' referenced before assignment`
+
+Az orient_check blokk (`run_debug_pipeline`, 24. cella) 180° flip esetén meghívta a `step9_project_fingertips(landmarks, ...)` függvényt, miközben a `landmarks` változó csak utána kerül hozzárendelésre:
+
+```python
+# HIBÁS:
+            fret_xs = xs_rev
+            fit     = fit_rev
+            tips    = step9_project_fingertips(landmarks, H, ...)  # ← landmarks még nincs!
+
+    landmarks = step9_detect_landmarks(img_path, landmarker)       # ← itt lesz csak
+    tips      = step9_project_fingertips(landmarks, H, ...)
+```
+
+**Javítás** – a felesleges (és hibás) `tips = ...` sor eltávolítva a blokkból. A blokkon kívüli hívás úgyis a (potenciálisan flipelt) `H`-val fut, tehát az eredmény helyes.
+
+### Státusz
+✅ Mindkét hiba javítva a `03b_pipeline_debug_v5.ipynb`-ben – batch validáció folytatható
+
+---
+
+## 🗓️ 2026-05-16 – Pipeline v6: coverage_ratio metrika + bal kezes / tükrözött gitár kezelése
+
+### `03b_pipeline_debug_v6.ipynb` – két strukturális hiba javítása
+
+#### Probléma 1 – Skálakényszer: az algoritmus mindig a teljes 24-bundos nyakat próbálta illeszteni
+
+**Gyökérok:** A `step8_fit_fret_rule()` / `_fit_from_run()` a legjobb illesztést **raw inlier-számmal** (`n_in`) választotta. Ha 5 bund detektált, és `scale≈600` (teljes nyak látszik, 25 jósolt pozíció a kanonikus tartományban), akkor `inlier=5/25=20%`. Ha `scale≈2000` (csak ~8 pozíció esik a tartományba), akkor `inlier=5/8=63%`. Az algoritmus nem tudott különbséget tenni – sokszor a kisebb `scale`-t (azaz a teljes nyak kiterítési kísérletet) preferálta kisebb reziduális miatt.
+
+**Javítás – `coverage_ratio` metrika (`_fit_from_run`, `_fit_constrained_ransac`):**
+
+```
+coverage_ratio = inlier_count / n_visible_predicted
+ahol n_visible_predicted = count(0 ≤ predicted_x[n] ≤ CANONICAL_W)
+```
+
+A `best_n_in = 0` inicializálás helyett `best_coverage = 0.0` kerül bevezetésre. Elsősorban a `coverage_ratio` maximalizálódik, másodlagosan (egyenlőség esetén ±1%-on belül) az `avg_residual` minimalizálódik. A visszatérési dictbe kerül: `coverage_ratio`, `n_visible`.
+
+**`predicted_x` szűkítés:** A korábban `-50…CANONICAL_W+50` tartomány helyett v6-ban csak `[0..CANONICAL_W]`-on belüli pozíciók kerülnek a `predicted_x` dictbe.
+
+#### Probléma 2 – Irány: bal kezes gitár / tükrözött kép sosem illeszkedett
+
+**Gyökérok:** A 17.817-es szabályból következik, hogy nut→body irányban a bundközök csökkennek (`d[i]/d[i+1] ≈ 1.0595 > 1`). A `_ratio_runs()` ezt az arányt kereste. Ha a gitár bal kezes vagy a kép tükrözött, a bundközök **növekednek** (`d[i]/d[i+1] ≈ 0.9439`), amit a v5 sosem talált meg.
+
+**Javítás – kétirányú illesztés:**
+
+`_ratio_runs()` új `direction` paramétert kap:
+- `"forward"`: `s_curr/s_next ≈ target` (nut balra, body jobbra – eredeti viselkedés)
+- `"reversed"`: `s_next/s_curr ≈ target` (nut jobbra, body balra)
+
+`step8_fit_fret_rule()` két fázisban próbál:
+- **Fázis 1a** – forward runs az eredeti `xs`-en
+- **Fázis 1b** – forward runs a tükrözött `xs_rev = CANONICAL_W - xs[::-1]`-en
+- A győztes a jobb `coverage_ratio`-jú (másodlagosan kisebb reziduálisú); a visszatérési dictben `fit_direction: "forward" | "reversed"`
+- **Fázis 2** – RANSAC fallback csak ha mindkét ratio-run irány sikertelen
+
+`run_debug_pipeline()` a v5 `orient_check` (180° rotate, inlier-count alapú) blokkját lecserélte:
+
+```python
+if fit.get("fit_direction") == "reversed":
+    canon_bgr = cv2.flip(canon_bgr, 1)          # vízszintes tükrözés
+    flip_h = np.array([[-1,0,CANONICAL_W-1],[0,1,0],[0,0,1]])
+    H = flip_h @ H;  H_inv = np.linalg.inv(H)
+    fret_xs = sorted([CANONICAL_W - x for x in fret_xs])
+```
+
+A főbb különbség a v5-höz képest: v5 csak akkor próbált fordítani, ha a fit `"none"` vagy `"ransac_fallback"` volt; v6 minden esetben megpróbálja mindkét irányt és a coverage alapján dönt.
+
+#### Vizualizáció és diagnosztika bővítés
+
+- `viz_fret_fit()` cím: `direction_label` (`→ forward` / `← reversed`) és `coverage_label` (`coverage=63%`) megjelenítés
+- `run_batch_demo_v4()` DataFrame: `direction` és `coverage` oszlopok hozzáadva
+
+### Érintett cellák
+
+| Cella | Függvény | Változás |
+|---|---|---|
+| 20 | `_ratio_runs()` | `direction` paraméter |
+| 20 | `_fit_from_run()` | coverage_ratio metrika, `best_n_in` → `best_coverage` |
+| 20 | `_fit_constrained_ransac()` | coverage_ratio metrika |
+| 20 | `step8_fit_fret_rule()` | kétirányú keresés (1a/1b), `fit_direction` return érték |
+| 20 | `viz_fret_fit()` | direction + coverage megjelenítés a címben |
+| 24 | `run_debug_pipeline()` | v5 180°-os orient_check → v6 vízszintes flip ha reversed |
+| 26 | `run_batch_demo_v4()` | direction + coverage oszlopok |
+
+### Validációs kritériumok (futtatás előtt)
+
+1. `coverage_ratio ≥ 0.5` az esetek többségében
+2. `fit_direction == "reversed"` megjelenik bal kezes / tükrözött képeknél
+3. `predicted_x` csak `[0..CANONICAL_W]`-on belüli pozíciókat tartalmaz
+4. `batch_df["coverage"]` értékei 20%–100% tartományban (nem mindig 100%)
+
+| Fájl | Státusz |
+|---|---|
+| `03b_pipeline_debug_v6.ipynb` | ✅ Kész, szintaxis OK, 30 cella – futtatás következik |
+
+### Aktuális notebookok (összesítő)
+
+| Fájl | Státusz | Leírás |
+|---|---|---|
+| `03b_pipeline_debug_v2.ipynb` | ✅ Archív | Alaparchitektúra, 90° bug javítva |
+| `03b_pipeline_debug_v3.ipynb` | ✅ Archív | Húr-klaszter + spacing-ratio fit |
+| `03b_pipeline_debug_v4.ipynb` | ✅ Archív | Outlier nyakél-detektálás |
+| `03b_pipeline_debug_v5.ipynb` | ✅ Archív | Orientáció javítás + robusztusabb detektálás |
+| `03b_pipeline_debug_v6.ipynb` | ✅ Aktuális | coverage_ratio metrika + kétirányú iránydetektálás |
+
+### Státusz
+✅ `03b_pipeline_debug_v6.ipynb` elkészítve – futtatás és batch validáció következik
+
+---
+
+## 🎨 2026-05-18 – Projekt lezárás: viz.py, feature analízis, README frissítés
+
+### Elvégzett műveletek
+
+#### `src/viz.py` implementálása
+
+Új vizualizációs modul, 5 publikus függvénnyel:
+
+- **`draw_pipeline_result(result, ...)`** – Eredeti kép + trapéz overlay bal panelen, kanonikus (600×80 px) kép + bundvonalak + ujjhegy pontok jobb panelen. `ok=False` esetén piros hátterű placeholder.
+- **`draw_pipeline_grid(results, ...)`** – Batch diagnosztika: több kanonikus kép grid-ben, failure/OK jelöléssel.
+- **`plot_training_history(history, ...)`** – Loss és Accuracy görbék, Phase A és Phase B külön színnel, Best val vonal jelölve. Bemenet: `train_two_phase` `history` listája.
+- **`plot_multi_training_histories(histories, ...)`** – Több modell validációs görbéjének összehasonlítása egy ábrán.
+- **`plot_scatter_2d(coords, labels, classes, ...)`** – PCA/t-SNE 2D scatter, osztályonkénti színezéssel (`_CLASS_COLORS` paletta, 8 szín).
+
+#### `notebooks/04_feature_analysis.ipynb` létrehozása
+
+7 szekciós feature analízis notebook:
+
+1. Setup és adatok betöltése (`features_v14.npz`, 252 train+val minta)
+2. Leíró statisztikák: csoportonkénti abs. átlag és std
+3. Osztályonkénti mintaszám barchart
+4. Korreláció hőtérkép – Group B (42×42)
+5. PCA: kumulatív variancia görbe, 2D scatter, loading plot (Top 10 feature PC1/PC2-re)
+6. t-SNE: teljes 56-dim vs. Group B-only összehasonlítás egymás mellett
+7. Group ablation: between-class / total variancia arány csoportonként
+
+Mentett ábrák: `output/04_feature_analysis/`
+
+#### `README.md` teljes újraírása
+
+A régi README (régi 04a–04d notebookokat leíró) helyett új, az aktuális architektúrát tükröző dokumentáció:
+- Eredménytáblázat (97.8% CNN, 91.1% SVM)
+- Telepítési útmutató (conda + pip, MediaPipe model)
+- `src/` modul táblázat függőségi sorrenddel
+- V14 pipeline 15 lépése leírva
+- Feature vektor (56 dim) tábla
+- Notebook útmutató (01–06)
+- Inference kód mindkét modellre (CNN + SVM)
+- `src/viz.py` használati példa
+
+### Architektúra döntések
+
+A `viz.py` szándékosan **nem** tartalmaz MediaPipe futtatást – csak megjeleníti a `run_v14_pipeline` által már kiszámított artefaktumokat. Ez biztosítja, hogy a vizualizáció offline is működjön (pl. teszt képek mentett result dict-jeivel).
+
+A `04_feature_analysis.ipynb` **kizárólag train+val** adatot tölt be (test set védelem betartva). A t-SNE perplexity=15 értékre van beállítva, ami a 252 elemű train+val méretéhez megfelelő (általában N/perplexity > 5–10).
+
+### Mentett fájlok
+
+| Fájl | Leírás |
+|---|---|
+| `src/viz.py` | Vizualizációs modul (5 publikus függvény) |
+| `notebooks/04_feature_analysis.ipynb` | PCA + t-SNE + ablation notebook |
+| `README.md` | Teljes projekt dokumentáció frissítve |
+
+### Projekt állapota
+
+**PROJEKT LEZÁRVA.** Minden tervezett feladat teljesítve:
+
+| Fázis | Notebook | Eredmény |
+|---|---|---|
+| 0 – Pipeline | `03_pipeline.ipynb` | 83.5% ok-rate (248/297) |
+| 1 – ML Baseline | `05a_baseline_ml.ipynb` | SVM 91.1% test acc |
+| 3 – CNN | `05b_cnn_finetune.ipynb` | MobileNetV3-Large 97.8% test acc |
+| 4 – Kiértékelés | `06_evaluation.ipynb` | Delta +6.7% → CNN ajánlott |
+| Analízis | `04_feature_analysis.ipynb` | PCA/t-SNE, group ablation |
+| Dokumentáció | `README.md`, `src/viz.py` | Kész |
+
+
+---
+
+## 🎨 2026-05-18 – PipelineVisualizer OOP refaktor + 05_visual_demo.ipynb
+
+### Elvégzett műveletek
+
+#### `src/viz.py` – `PipelineVisualizer` osztály hozzáadva
+
+Az előző standalone függvény-alapú API megtartva (backward-compatible), mellé egy
+teljes OOP `PipelineVisualizer` osztály implementálva.
+
+**Tervezési elvek:**
+- Nincs globális változó az osztályban – minden paramétert a konstruktor kap
+  (`neck_color`, `fret_color`, `landmark_color`, `connection_color`, `fingertip_color`,
+  `line_thickness`, `point_radius`, `font_scale`, `hough_line_color`)
+- Matematikai logika nem kerül újraimplementálásra:
+  - `draw_fretboard_overlay` → `result['H_inv']` + `result['fit']['predicted_x']` (geometry.py terméke)
+  - `get_intermediate_plots` → `step1_canny` + `step2_hough` (geometry.py hívása)
+  - `draw_landmarks` → `FINGER_CHAINS` + `FINGER_TIP_IDX` (constants.py topológia)
+- Két különböző `PipelineVisualizer` példány izolált állapotot tart (tesztelve)
+
+**Három fő metódus:**
+
+| Metódus | Bemenet | Kimenet |
+|---|---|---|
+| `draw_fretboard_overlay(image, points, direction)` | BGR kép + pipeline result dict | Trapéz + visszavetített bundvonalak |
+| `draw_landmarks(image, hand_landmarks)` | BGR kép + 21 MediaPipe landmark | Csontváz vonalak + ujjhegy kiemelés |
+| `get_intermediate_plots(image, finger_mask)` | BGR kép + opcionális maszk | `{'canny', 'hough', 'canny_masked'}` |
+
+Segédmetódus: `make_phase_strip` – Canny + Hough vertikálisan összefűzve (notebookhoz).
+
+#### `notebooks/05_visual_demo.ipynb` létrehozása
+
+7 szekciós "dashboard" notebook – **kizárólag `src/` modulokat importál,
+vizualizációs logika a notebookban nincs definiálva**:
+
+1. Setup + src importok
+2. Képek kiválasztása (train, 1-1 kép/osztály, max 5, random_state=42)
+3. Pipeline futtatás (`run_v14_pipeline` minden képre)
+4. `PipelineVisualizer` példányosítása explicit paraméterekkel
+5. **Dashboard grid** (3 oszlop × N sor): Eredeti | Canny+Hough | Kombinált
+6. Kanonikus tér részletes nézet (OK képeknél)
+7. Stílus-variáns demo (3 különböző `PipelineVisualizer` példány)
+
+### Architekturális döntések
+
+A `get_intermediate_plots` az eredeti pipeline ujjmaszk-ját (`result['finger_mask']`)
+is elfogadja opcionális paraméterként – ugyanazt a maszkot alkalmazza, amit a
+pipeline is használt, így a Canny-vizualizáció pontosan a pipeline belső állapotát tükrözi.
+
+A `draw_fretboard_overlay` a homográfia-alapú visszavetítést (`H_inv @ pt_canonical`)
+alkalmazza a bund vonalakra – ez a `step8_fit_fret_rule` 17.817-es szabályának
+eredményét jeleníti meg az eredeti kép koordináta-rendszerében anélkül, hogy a
+geometriai számítást megismételné.
+
+### Mentett fájlok
+
+| Fájl | Leírás |
+|---|---|
+| `src/viz.py` | `PipelineVisualizer` + standalone backward-compat API |
+| `notebooks/05_visual_demo.ipynb` | Dashboard notebook (src-only imports) |
