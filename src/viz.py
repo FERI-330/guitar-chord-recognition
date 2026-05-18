@@ -543,6 +543,77 @@ class PipelineVisualizer:
         return np.vstack([top_r, sep, bot_r])
 
 
+    def draw_3panel_comparison(
+        self,
+        image: np.ndarray,
+        result_geo: dict,
+        result_int: dict,
+        figsize: tuple = (18, 5),
+        save_path: Optional[Path] = None,
+    ) -> "plt.Figure":
+        """Háromoszlopos összehasonlító nézet egy képhez.
+
+        Oszlopok:
+          1. Eredeti kép + MediaPipe ujjak (ha vannak landmarks)
+          2. GEOMETRIC_RULE bund-illesztés overlay
+          3. INTENSITY_DATA bund-illesztés overlay
+
+        A cím soronként mutatja: osztály | ok-státusz | coverage_ratio | raw csúcsok száma
+
+        Args:
+            image:       Eredeti BGR kép.
+            result_geo:  ``run_v14_pipeline(..., fret_detector=GeometricFretDetector())`` kimenet.
+            result_int:  ``run_v14_pipeline(..., fret_detector=IntensityFretDetector())`` kimenet.
+            figsize:     Matplotlib figsize.
+            save_path:   Opcionális PNG mentés.
+
+        Returns:
+            Matplotlib Figure.
+        """
+        cls      = result_geo.get("class", result_int.get("class", "?"))
+        fname    = result_geo.get("fname", result_geo.get("filename", ""))
+
+        def _cov(r: dict) -> float:
+            return r.get("fit", {}).get("coverage_ratio", 0.0) or 0.0
+
+        def _n_raw(r: dict) -> int:
+            xs = r.get("fret_xs_raw")
+            return len(xs) if xs is not None else 0
+
+        def _ok_str(r: dict) -> str:
+            return "✓" if r.get("ok") else f"✗ {r.get('invalid_reason', '')}"
+
+        # ── Panel képek összeállítása ──────────────────────────────────────
+        vis_orig = self.draw_landmarks(image, result_geo.get("landmarks") or [])
+        vis_geo  = self.draw_fretboard_overlay(image, result_geo)
+        vis_int  = self.draw_fretboard_overlay(image, result_int)
+
+        fig, axes = plt.subplots(1, 3, figsize=figsize,
+                                 gridspec_kw={"wspace": 0.04})
+        fig.suptitle(f"[{cls}]  {fname}", fontsize=10, fontweight="bold")
+
+        panels = [
+            (vis_orig,
+             f"Eredeti + MediaPipe ujjak"),
+            (vis_geo,
+             f"GEOMETRIC_RULE  {_ok_str(result_geo)}\n"
+             f"cov={_cov(result_geo):.3f}  raw_n={_n_raw(result_geo)}"),
+            (vis_int,
+             f"INTENSITY_DATA  {_ok_str(result_int)}\n"
+             f"cov={_cov(result_int):.3f}  raw_n={_n_raw(result_int)}"),
+        ]
+
+        for ax, (vis, title) in zip(axes, panels):
+            ax.imshow(vis[:, :, ::-1])
+            ax.set_title(title, fontsize=8.5)
+            ax.axis("off")
+
+        if save_path is not None:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=130, bbox_inches="tight")
+        return fig
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone segédfüggvények (backward-compatible API)
 # ─────────────────────────────────────────────────────────────────────────────
