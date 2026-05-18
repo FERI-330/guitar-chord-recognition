@@ -355,6 +355,158 @@ class PipelineVisualizer:
         return result
 
     # ──────────────────────────────────────────────────────────────────────
+    # Detektor-összehasonlítás
+    # ──────────────────────────────────────────────────────────────────────
+
+    def draw_detector_comparison(
+        self,
+        image: np.ndarray,
+        result_geo: dict,
+        result_int: dict,
+        figsize: tuple = (18, 9),
+        save_path: Optional[Path] = None,
+    ) -> "plt.Figure":
+        """Geometriai vs. intenzitás-alapú detektor összehasonlítása.
+
+        Sor 1 – Eredeti képre visszavetítve:
+          [Geometriai overlay] | [Intenzitás overlay] | [Diff (csak eltérő bundok)]
+
+        Sor 2 – Kanonikus tér:
+          [Geo kanonikus + bundvonalak] | [Intenzitás kanonikus + bundvonalak]
+          | [Gradiens-profil + csúcsok]
+
+        Args:
+            image:       Eredeti BGR kép.
+            result_geo:  ``run_v14_pipeline(..., fret_detector=GeometricFretDetector())`` kimenet.
+            result_int:  ``run_v14_pipeline(..., fret_detector=IntensityFretDetector())`` kimenet.
+            figsize:     Matplotlib figsize.
+            save_path:   Opcionális PNG mentés.
+
+        Returns:
+            Matplotlib Figure.
+        """
+        fig, axes = plt.subplots(2, 3, figsize=figsize)
+        fig.suptitle("Detektor összehasonlítás: Geometriai vs. Intenzitás",
+                     fontsize=13, fontweight="bold")
+
+        cls = result_geo.get("class", result_int.get("class", "?"))
+
+        # ── Sor 1: visszavetített bundok az eredeti képen ─────────────────
+        viz_geo = self.draw_fretboard_overlay(image, result_geo)
+        viz_int = self.draw_fretboard_overlay(image, result_int)
+
+        # Diff: bundok amelyek csak az egyik detektornál jelennek meg
+        pred_geo = set(result_geo.get("fit", {}).get("predicted_x", {}).keys())
+        pred_int = set(result_int.get("fit", {}).get("predicted_x", {}).keys())
+        only_geo = pred_geo - pred_int
+        only_int = pred_int - pred_geo
+        common   = pred_geo & pred_int
+
+        viz_diff = image.copy()
+        px_geo = result_geo.get("fit", {}).get("predicted_x", {})
+        px_int = result_int.get("fit", {}).get("predicted_x", {})
+        H_inv_geo = result_geo.get("H_inv")
+        H_inv_int = result_int.get("H_inv")
+        for fret_n, fx in px_geo.items():
+            color = (50, 200, 50) if fret_n in common else (0, 0, 220)
+            if H_inv_geo is not None:
+                self._draw_fret_line_on_image(viz_diff, H_inv_geo, float(fx), color)
+        for fret_n, fx in px_int.items():
+            if fret_n not in common:
+                if H_inv_int is not None:
+                    self._draw_fret_line_on_image(viz_diff, H_inv_int, float(fx),
+                                                   (220, 100, 0))
+
+        for ax, vis, title in [
+            (axes[0, 0], viz_geo, f"Geometriai  [{cls}]  "
+             f"cov={result_geo.get('fit', {}).get('coverage_ratio', 0):.2f}"),
+            (axes[0, 1], viz_int, f"Intenzitás  [{cls}]  "
+             f"cov={result_int.get('fit', {}).get('coverage_ratio', 0):.2f}"),
+            (axes[0, 2], viz_diff, f"Eltérések  közös={len(common)} "
+             f"csak-geo={len(only_geo)} csak-int={len(only_int)}"),
+        ]:
+            ax.imshow(vis[:, :, ::-1])
+            ax.set_title(title, fontsize=9)
+            ax.axis("off")
+
+        # ── Sor 2: kanonikus képek + gradiens-profil ──────────────────────
+        for col, r, label in [
+            (0, result_geo, "Geo – kanonikus"),
+            (1, result_int, "Intenzitás – kanonikus"),
+        ]:
+            ax = axes[1, col]
+            canon = r.get("canon")
+            if canon is not None:
+                vis2 = canon.copy()
+                fit = r.get("fit")
+                if fit:
+                    for fret_n, fx in fit.get("predicted_x", {}).items():
+                        xi = int(round(float(fx)))
+                        cv2.line(vis2, (xi, 0), (xi, CANONICAL_H),
+                                 (80, 80, 240), 1)
+                        if int(fret_n) % 4 == 0 and int(fret_n) > 0:
+                            cv2.putText(vis2, str(int(fret_n)),
+                                        (xi + 2, CANONICAL_H - 3),
+                                        cv2.FONT_HERSHEY_PLAIN, 0.55,
+                                        (200, 200, 80), 1)
+                ax.imshow(vis2[:, :, ::-1], aspect="auto",
+                          extent=[0, CANONICAL_W, CANONICAL_H, 0])
+            else:
+                ax.set_facecolor("#f8e8e8")
+            ax.set_title(label, fontsize=9)
+            ax.axis("off")
+
+        # Gradiens-profil (IntensityFretDetector-tól)
+        ax_p = axes[1, 2]
+        profile = result_int.get("intensity_profile")
+        if profile is not None:
+            xs = np.arange(len(profile))
+            ax_p.fill_between(xs, profile, alpha=0.35, color="steelblue")
+            ax_p.plot(xs, profile, color="steelblue", lw=1.2)
+            # Detektált csúcsok bejelölve
+            for fx in result_int.get("fret_xs_raw", []):
+                xi = int(round(fx))
+                if 0 <= xi < len(profile):
+                    ax_p.axvline(xi, color="C3", lw=0.9, alpha=0.7)
+            ax_p.set_xlim(0, len(profile))
+            ax_p.set_ylim(0, 1.05)
+            ax_p.set_xlabel("Kanonikus x (px)", fontsize=8)
+            ax_p.set_ylabel("Norm. gradiens", fontsize=8)
+        else:
+            ax_p.text(0.5, 0.5, "Profil nem elérhető", ha="center", va="center",
+                      transform=ax_p.transAxes, color="gray")
+        ax_p.set_title("Intenzitás gradiens-profil (piros = csúcs)", fontsize=9)
+        ax_p.grid(True, alpha=0.3)
+        ax_p.tick_params(labelsize=7)
+
+        plt.tight_layout()
+        if save_path is not None:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=130, bbox_inches="tight")
+        return fig
+
+    def _draw_fret_line_on_image(
+        self,
+        image: np.ndarray,
+        H_inv: np.ndarray,
+        fx: float,
+        color: tuple,
+    ) -> None:
+        """Egy bund visszavetítése a kanonikus térből az eredeti képre (in-place)."""
+        pt_top = np.array([fx, 0.0, 1.0])
+        pt_bot = np.array([fx, float(CANONICAL_H), 1.0])
+        proj_top = H_inv @ pt_top
+        proj_bot = H_inv @ pt_bot
+        if abs(proj_top[2]) < 1e-9 or abs(proj_bot[2]) < 1e-9:
+            return
+        tx = int(round(proj_top[0] / proj_top[2]))
+        ty = int(round(proj_top[1] / proj_top[2]))
+        bx = int(round(proj_bot[0] / proj_bot[2]))
+        by = int(round(proj_bot[1] / proj_bot[2]))
+        cv2.line(image, (tx, ty), (bx, by), color,
+                 max(1, self.line_thickness - 1), lineType=cv2.LINE_AA)
+
+    # ──────────────────────────────────────────────────────────────────────
     # Összetett kép segédletek
     # ──────────────────────────────────────────────────────────────────────
 

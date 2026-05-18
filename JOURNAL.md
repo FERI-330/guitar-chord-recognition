@@ -985,3 +985,116 @@ geometriai számítást megismételné.
 |---|---|
 | `src/viz.py` | `PipelineVisualizer` + standalone backward-compat API |
 | `notebooks/05_visual_demo.ipynb` | Dashboard notebook (src-only imports) |
+
+---
+
+## 🔬 2026-05-19 – IntensityFretDetector fázis megkezdése
+
+### Alapállapot rögzítése (commit: 46e9d12)
+
+**Baseline teljesítmény (V14 GeometricFretDetector):**
+- Pipeline ok-rate: 248/297 = 83.5%
+- SVM_B: test_acc=91.1%, F1=0.907
+- MobileNetV3-Large: test_acc=97.8%, F1=0.971
+
+**Cél:** Plug-and-play `IntensityFretDetector` bevezetése "Zero-Break" garanciával.
+Az SVM és CNN feature kinyerés (`assemble_feature_vector`, `step9_project_fingertips`)
+nem észleli a detektáló csere tényét — a `fit` dict struktúra azonos marad.
+
+### Architektúra terv
+
+**Interfész:** `FretDetectorInterface` ABC (`src/fretboard.py`)
+- Egységes `detect(canon_bgr, nut) -> DetectorResult dict` szignatúra
+- `DetectorResult` kötelező kulcsok: `fit`, `fret_xs_raw`, `fret_xs_filt`, `removed_pairs`, `method`
+- `fit` dict struktúra változatlan (azonos `step8_fit_fret_rule` kimenettel)
+
+**Wrapperek:**
+- `GeometricFretDetector`: meglévő step7+suppress+step8 logika osztályba zárva
+- `IntensityFretDetector`: Sobel-X gradiens csúcsdetektálás → same step8 fitting
+
+**`run_v14_pipeline` változás:** `fret_detector=None` opcionális paraméter hozzáadva.
+Ha `None` → `GeometricFretDetector()` (backward compatible, semmi sem törik el).
+
+**Új result dict kulcs:** `fret_detector_method` ('geometric' / 'intensity')
+— ez az egyetlen hozzáadott kulcs; meglévők nem változnak.
+
+### "Zero-Break" garancia biztosítása
+
+A `assemble_feature_vector` (`src/features.py`) csak ezeket a kulcsokat olvassa:
+- `result['landmarks']`, `result['ok']`, `result['neck']`, `result['fingertips']`, `result['fit']`
+
+A `fit` dict-ből csak: `fit['predicted_x']`, `fit['coverage_ratio']`
+
+Mindkét detektor ugyanezt a `step8_fit_fret_rule` függvényt hívja a fitting-hez →
+a `predicted_x` és `coverage_ratio` kulcsok garantáltan jelen lesznek, azonos értelmezéssel.
+
+### Implementáció – `src/fretboard.py`
+
+**`FretDetectorInterface(ABC)`** – absztrakt alaposztály, `detect(canon_bgr, nut) -> dict`.
+
+**`GeometricFretDetector`** – a meglévő step7+suppress+step8 logika OOP wrapperbe zárva.
+- `.detect()` visszatér: `{fit, fret_xs_raw, fret_xs_filt, removed_pairs, method="geometric"}`
+
+**`IntensityFretDetector`** – Sobel-X gradiens profilon alapuló csúcsdetektálás.
+- `.gradient_profile(canon_bgr) -> np.ndarray`: Sobel-X → abs → column-sum → Gaussian smooth → [0,1] normalizálás
+- `.detect()`: `scipy.signal.find_peaks` → kandidát fret x-pozíciók → ugyanaz a `step8_fit_fret_rule`
+- Paraméterek: `sobel_ksize=3`, `smooth_sigma=1.5`, `peak_height=0.12`, `peak_distance=7`, `peak_prominence=0.06`, `peak_max_width=14.0`
+
+**`_make_empty_fit()`** – 18 kulcsos üres fit dict, hogy korai kilépésnél is konzisztens legyen a struktúra.
+
+**`run_v14_pipeline`** módosítás:
+- `fret_detector: Optional[FretDetectorInterface] = None` opcionális paraméter
+- `out["fret_detector_method"] = "none"` inicializálva a dict elején (korai kilépés esetén is jelen van)
+- Steps 12–14: közvetlen step7/suppress/step8 hívás helyett `_detector.detect()` delegálás
+- Step 15 bugfix: `fit=fit` → `fit=out.get("fit")` (scope változás miatti NameError javítva)
+
+### `src/viz.py` – `draw_detector_comparison` metódus
+
+2×3 matplotlib ábra a két detektor vizuális összehasonlításához:
+- Sor 1: geo overlay | int overlay | diff (közös=zöld, csak-geo=kék, csak-int=narancssárga)
+- Sor 2: geo canonical fret-lines | int canonical fret-lines | gradiens profil görbe
+
+`_draw_fret_line_on_image()` privát helper: egyetlen fret sor visszavetítése `H_inv` mátrixszal.
+
+### Regressziós teszt – `tests/test_fret_detectors.py`
+
+9 teszt futtatása, **9/9 PASS**:
+
+| # | Teszt | Eredmény |
+|---|---|---|
+| 1 | ABC enforcement (konkrét osztály nem példányosítható) | PASS |
+| 2 | Kötelező result dict kulcsok (mock) | PASS |
+| 3 | `fit` dict kulcsparitás geo vs. int (mock) | PASS |
+| 4 | Gradiens profil alakja (600-elem, [0,1]) | PASS |
+| 5 | `_make_empty_fit` struktúra (18 kulcs) | PASS |
+| 6 | Pipeline kivétel nélkül fut (5 valódi kép) | PASS |
+| 7 | result dict kulcsparitás geo vs. int (valódi képek) | PASS |
+| 8 | `assemble_feature_vector` kompatibilitás | PASS |
+| 9 | `fret_detector_method` label helyes (`ok=True` → "geometric"/"intensity", `ok=False` → "none") | PASS |
+
+### Összehasonlítás 5 valódi képen
+
+| Fájl | Cls | geo_ok | int_ok | geo_cov | int_cov | geo_n | int_n |
+|---|---|---|---|---|---|---|---|
+| 1762212326133.jpg | A | ✗ | ✗ | 0.000 | 0.000 | 0 | 0 |
+| IMG_20251102_024129_1.jpg | B | ✓ | ✓ | 0.667 | 0.556 | 9 | 9 |
+| 1762212395194.jpg | C | ✓ | ✓ | 0.667 | 0.391 | 6 | 23 |
+| 1762212432929.jpg | D | ✓ | ✓ | 0.455 | 0.455 | 11 | 11 |
+| 1762212477984.jpg | E | ✓ | ✓ | 0.833 | 0.538 | 6 | 13 |
+
+**Összefoglalás:**
+- ok-rate: geo 80%, int 80% (azonos — az A-kép korai lépésben bukik, nem a detektornál)
+- geo avg coverage: **0.524** vs. int avg coverage: **0.388**
+- int átlagosan 11.2 raw csúcsot talál (geo: 6.4) — több zajpozíciót is behoz
+- GeometricFretDetector dominál egyenes, kontrasztos képeken
+- IntensityFretDetector robusztusabb lehet diffúz megvilágításnál, de a `step8` fitting hatékonyabban szűri a pontos Hough-vonalakat
+
+### Tanulságok
+
+1. **Plug-and-play sikerült:** A `fret_detector=` paraméter valóban zero-break — a feature pipeline nem veszi észre a cserét.
+2. **Hough > gradiens ezen az adathalmazon:** A 600×80px canonical képen a Hough-alapú detektor magasabb coverage-t ad, mert a fogólap-vonalak élesek és párhuzamosak.
+3. **IntensityFretDetector értéke:** Tartalékmódként hasznos lehet olyan képekre ahol a Hough-step nem talál elég vonalat (`no_hough_lines` hiba). Jövőbeli fejlesztés: fallback-lánc geo → int.
+4. **`fret_detector_method` "none" értéke:** Korai kilépésnél (trapézoid hiba stb.) a kulcs most már mindig jelen van a result dictben — ez konzisztensebbé teszi a batch loop feldolgozást.
+
+### Státusz
+✅ `FretDetectorInterface` + `IntensityFretDetector` implementálva és tesztelve (9/9 PASS)
