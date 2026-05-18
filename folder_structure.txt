@@ -1,4 +1,14 @@
 .
+├── checkpoints
+│   ├── best_MobLarge_phA.pth
+│   ├── best_MobLarge_phB.pth
+│   ├── best_MobSmall_phA.pth
+│   ├── best_MobSmall_phB.pth
+│   ├── best_shuffle_phA.pth
+│   ├── best_shuffle_phB.pth
+│   ├── mobilenet_v3_large.pth
+│   ├── mobilenet_v3_small.pth
+│   └── shufflenet_v2_x1_0.pth
 ├── data
 │   ├── all
 │   │   ├── A
@@ -306,6 +316,12 @@
 │   │       ├── IMG_20251102_023834.jpg
 │   │       ├── IMG_20251102_023835.jpg
 │   │       └── IMG_20251102_023836.jpg
+│   ├── features
+│   │   ├── feature_names.txt
+│   │   ├── features_full.csv
+│   │   ├── features.npz
+│   │   └── scaler.pkl
+│   ├── split_manifest.csv
 │   ├── test
 │   │   ├── A
 │   │   │   ├── 1762212326034.jpg
@@ -619,10 +635,150 @@
 │           ├── IMG_20251102_023834.jpg
 │           ├── IMG_20251102_023835.jpg
 │           └── IMG_20251102_023836.jpg
+├── documentation
+│   └── projekt_naplo.md
 ├── environment.yaml
 ├── folder_structure.txt
-├── IMPLEMENTATION_SUMMARY.md
+├── fretboard.txt
+├── JOURNAL.md
+├── models
+│   └── hand_landmarker.task
+├── notebooks
+│   ├── 01_EDA.ipynb
+│   ├── 02_split_manifest.ipynb
+│   ├── 03c_pipeline_fixes_design.ipynb
+│   └── old
+│       ├── 03b_fretboard_debug.ipynb
+│       ├── 03b_pipeline_debug_v10.ipynb
+│       ├── 03b_pipeline_debug_v11.ipynb
+│       ├── 03b_pipeline_debug_v12.ipynb
+│       ├── 03b_pipeline_debug_v13.ipynb
+│       ├── 03b_pipeline_debug_v2.ipynb
+│       ├── 03b_pipeline_debug_v3.ipynb
+│       ├── 03b_pipeline_debug_v4.ipynb
+│       ├── 03b_pipeline_debug_v5.ipynb
+│       ├── 03b_pipeline_debug_v6.ipynb
+│       ├── 03b_pipeline_debug_v7.ipynb
+│       ├── 03b_pipeline_debug_v8.ipynb
+│       ├── 03b_pipeline_debug_v9.ipynb
+│       ├── 03_feature_pipeline.ipynb
+│       ├── 03_preprocessing.ipynb
+│       ├── 04_10_spacing_fit.ipynb
+│       ├── 04_1_setup_sampling.ipynb
+│       ├── 04_2_mediapipe_landmarks.ipynb
+│       ├── 04_3_canny_finger_mask.ipynb
+│       ├── 04_4_hough_lines.ipynb
+│       ├── 04_5_neck_angle.ipynb
+│       ├── 04_6_line_split.ipynb
+│       ├── 04_7_outer_edges.ipynb
+│       ├── 04_8_trapezoid.ipynb
+│       ├── 04_9_canonical_nut_frets.ipynb
+│       ├── 04a_baseline_ml.ipynb
+│       ├── 04b_mobile_cnn.ipynb
+│       ├── 04c_efficientnet_b0.ipynb
+│       ├── 04d_advanced_cnn.ipynb
+│       └── 04_data_leakage_check.ipynb
+├── output
+│   ├── 01_EDA
+│   │   └── 03_class_distribution.png
+│   ├── 02_split_manifest
+│   │   └── split_check.png
+│   ├── 03b_pipeline_debug
+│   │   └── outer_edges_debug
+│   │       ├── 149015_edge_debug.json
+│   │       ├── 149015_overlay.png
+│   │       ├── 149015_proj_hist.png
+│   │       ├── 149015_proj_scatter.png
+│   │       ├── 1686_edge_debug.json
+│   │       ├── 1686_overlay.png
+│   │       ├── 1686_proj_hist.png
+│   │       ├── 1686_proj_scatter.png
+│   │       ├── 18373_edge_debug.json
+│   │       ├── 18373_overlay.png
+│   │       ├── 18373_proj_hist.png
+│   │       ├── 18373_proj_scatter.png
+│   │       ├── 223266_edge_debug.json
+│   │       ├── 223266_overlay.png
+│   │       ├── 223266_proj_hist.png
+│   │       ├── 223266_proj_scatter.png
+│   │       ├── 329223_edge_debug.json
+│   │       ├── 329223_overlay.png
+│   │       ├── 329223_proj_hist.png
+│   │       ├── 329223_proj_scatter.png
+│   │       ├── 353611_edge_debug.json
+│   │       ├── 353611_overlay.png
+│   │       ├── 353611_proj_hist.png
+│   │       ├── 353611_proj_scatter.png
+│   │       ├── 427190_edge_debug.json
+│   │       ├── 427190_overlay.png
+│   │       ├── 427190_proj_hist.png
+│   │       ├── 427190_proj_scatter.png
+│   │       ├── 42_edge_debug.json
+│   │       ├── 42_overlay.png
+│   │       ├── 42_proj_hist.png
+│   │       ├── 42_proj_scatter.png
+│   │       ├── 43_edge_debug.json
+│   │       ├── 43_overlay.png
+│   │       ├── 43_proj_hist.png
+│   │       ├── 43_proj_scatter.png
+│   │       ├── 465321_edge_debug.json
+│   │       ├── 465321_overlay.png
+│   │       ├── 465321_proj_hist.png
+│   │       ├── 465321_proj_scatter.png
+│   │       ├── 474845_edge_debug.json
+│   │       ├── 474845_overlay.png
+│   │       ├── 474845_proj_hist.png
+│   │       ├── 474845_proj_scatter.png
+│   │       ├── 51770_edge_debug.json
+│   │       ├── 51770_overlay.png
+│   │       ├── 51770_proj_hist.png
+│   │       ├── 51770_proj_scatter.png
+│   │       ├── 54898_edge_debug.json
+│   │       ├── 54898_overlay.png
+│   │       ├── 54898_proj_hist.png
+│   │       ├── 54898_proj_scatter.png
+│   │       ├── 564210_edge_debug.json
+│   │       ├── 564210_overlay.png
+│   │       ├── 564210_proj_hist.png
+│   │       ├── 564210_proj_scatter.png
+│   │       ├── 6977_edge_debug.json
+│   │       ├── 6977_overlay.png
+│   │       ├── 6977_proj_hist.png
+│   │       ├── 6977_proj_scatter.png
+│   │       ├── 923905_edge_debug.json
+│   │       ├── 923905_overlay.png
+│   │       ├── 923905_proj_hist.png
+│   │       ├── 923905_proj_scatter.png
+│   │       ├── 940983_edge_debug.json
+│   │       ├── 940983_overlay.png
+│   │       ├── 940983_proj_hist.png
+│   │       ├── 940983_proj_scatter.png
+│   │       ├── 967762_edge_debug.json
+│   │       ├── 967762_overlay.png
+│   │       ├── 967762_proj_hist.png
+│   │       ├── 967762_proj_scatter.png
+│   │       ├── outer_edges_fix_report.md
+│   │       └── tests_results.txt
+│   ├── 03_feature_pipeline
+│   │   ├── feature_correlation.png
+│   │   ├── sanity_check_detections.png
+│   │   ├── sanity_check_full.png
+│   │   └── tsne_features.png
+│   ├── 03_preprocessing
+│   │   └── train_batch_sanity.png
+│   ├── 04a_baseline_ml
+│   │   ├── baseline_results.csv
+│   │   ├── best_confusion_matrix.png
+│   │   └── leaderboard.png
+│   ├── 04b_mobile_cnn
+│   │   ├── mobile_cnn_results.csv
+│   │   └── mobile_leaderboard.png
+│   ├── 04_data_leakage_check
+│   │   ├── leakage_audit.csv
+│   │   └── phash_leaks.csv
+│   └── 04_model
 ├── README.md
+├── refactor_notebooks.py
 └── requirements.txt
 
-27 directories, 599 files
+44 directories, 738 files

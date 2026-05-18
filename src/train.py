@@ -1,152 +1,244 @@
-import os
+"""
+src/train.py
+
+Training loop, kiértékelés, early stopping, checkpoint kezelés.
+Phase-A / Phase-B protokoll (frozen backbone → unfreeze).
+"""
+from __future__ import annotations
+
 from pathlib import Path
-import time
-import pandas as pd
-from PIL import Image
+from typing import Optional
 
+import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as T
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
 
-class ManifestDataset(Dataset):
-    def __init__(self, df, class_to_idx, transform=None):
-        self.df = df.reset_index(drop=True)
-        self.transform = transform
-        self.class_to_idx = class_to_idx
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        img = Image.open(row['path']).convert('RGB')
-        if self.transform:
-            img = self.transform(img)
-        label = self.class_to_idx[row['class']]
-        return img, label
+from src.config import CFG, PATHS
 
 
-def get_transforms(img_size=224, train=True):
-    if train:
-        return T.Compose([
-            T.RandomResizedCrop(img_size),
-            T.RandomHorizontalFlip(),
-            T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-    else:
-        return T.Compose([
-            T.Resize(int(img_size * 1.15)),
-            T.CenterCrop(img_size),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
+# ─────────────────────────────────────────────────────────────────────────────
+# EarlyStopping
+# ─────────────────────────────────────────────────────────────────────────────
+
+class EarlyStopping:
+    """Validációs loss alapú early stopping + best model mentés."""
+
+    def __init__(self,
+                 patience: int = 10,
+                 min_delta: float = 1e-4,
+                 ckpt_path: Optional[Path] = None):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.ckpt_path = ckpt_path
+        self.best_loss = float("inf")
+        self.counter = 0
+        self.best_state: Optional[dict] = None
+
+    def step(self, val_loss: float, model: nn.Module) -> bool:
+        """Visszaad True-t ha le kell állítani."""
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            self.best_state = {k: v.cpu().clone()
+                               for k, v in model.state_dict().items()}
+            if self.ckpt_path is not None:
+                self.ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(self.best_state, self.ckpt_path)
+        else:
+            self.counter += 1
+        return self.counter >= self.patience
+
+    def restore_best(self, model: nn.Module) -> None:
+        if self.best_state is not None:
+            model.load_state_dict(self.best_state)
+            print(f"  Best model restored (val_loss={self.best_loss:.4f})")
 
 
-def get_dataloaders(manifest_path, batch_size=16, img_size=224, num_workers=2):
-    df = pd.read_csv(manifest_path)
-    classes = sorted(df['class'].unique())
-    class_to_idx = {c: i for i, c in enumerate(classes)}
+# ─────────────────────────────────────────────────────────────────────────────
+# Epoch szintű lépések
+# ─────────────────────────────────────────────────────────────────────────────
 
-    dfs = {s: df[df['split'] == s].reset_index(drop=True) for s in ['train', 'val', 'test']}
+def train_one_epoch(model: nn.Module,
+                    loader: DataLoader,
+                    criterion: nn.Module,
+                    optimizer: torch.optim.Optimizer,
+                    device: torch.device) -> tuple[float, float]:
+    """Egy tanítási epoch.
 
-    ds_train = ManifestDataset(dfs['train'], class_to_idx, transform=get_transforms(img_size, train=True))
-    ds_val = ManifestDataset(dfs['val'], class_to_idx, transform=get_transforms(img_size, train=False))
-    ds_test = ManifestDataset(dfs['test'], class_to_idx, transform=get_transforms(img_size, train=False))
-
-    dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    dl_test = DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-
-    return dl_train, dl_val, dl_test, class_to_idx
-
-
-def train_one_epoch(model, device, dataloader, criterion, optimizer):
+    Visszaad: (átlagos loss, accuracy)
+    """
     model.train()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    for imgs, labels in dataloader:
-        imgs = imgs.to(device)
-        labels = labels.to(device)
+    total_loss = correct = total = 0
+    for X, y in loader:
+        X, y = X.to(device), y.to(device)
+        logits = model(X)
+        loss = criterion(logits, y)
         optimizer.zero_grad()
-        outputs = model(imgs)
-        loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-
-        total_loss += loss.item() * imgs.size(0)
-        preds = outputs.argmax(dim=1)
-        correct += (preds == labels).sum().item()
-        total += imgs.size(0)
-
+        total_loss += loss.item() * len(y)
+        correct += (logits.argmax(1) == y).sum().item()
+        total += len(y)
     return total_loss / total, correct / total
 
 
-def evaluate(model, device, dataloader, criterion):
+@torch.no_grad()
+def evaluate(model: nn.Module,
+             loader: DataLoader,
+             criterion: nn.Module,
+             device: torch.device) -> tuple[float, float, np.ndarray, np.ndarray]:
+    """Validáció / teszt kiértékelés.
+
+    Visszaad: (loss, accuracy, all_preds, all_labels)
+    """
     model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for imgs, labels in dataloader:
-            imgs = imgs.to(device)
-            labels = labels.to(device)
-            outputs = model(imgs)
-            loss = criterion(outputs, labels)
-            total_loss += loss.item() * imgs.size(0)
-            preds = outputs.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += imgs.size(0)
-    return total_loss / total, correct / total
+    total_loss = correct = total = 0
+    all_preds, all_labels = [], []
+    for X, y in loader:
+        X, y = X.to(device), y.to(device)
+        logits = model(X)
+        loss = criterion(logits, y)
+        total_loss += loss.item() * len(y)
+        preds = logits.argmax(1)
+        correct += (preds == y).sum().item()
+        total += len(y)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(y.cpu().numpy())
+    return (total_loss / total, correct / total,
+            np.array(all_preds), np.array(all_labels))
 
 
-def main(manifest_path='data/split_manifest.csv', batch_size=16, img_size=224, epochs=1, lr=1e-3, out_dir='output/04_model'):
-    manifest_path = Path(manifest_path)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# Kétfázisú training protokoll
+# ─────────────────────────────────────────────────────────────────────────────
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def train_two_phase(model: nn.Module,
+                    model_name: str,
+                    train_loader: DataLoader,
+                    val_loader: DataLoader,
+                    class_weights: torch.Tensor,
+                    device: torch.device,
+                    label: str = "model",
+                    verbose: bool = True) -> dict:
+    """Phase-A (frozen backbone) → Phase-B (utolsó blokkok felolvadnak).
 
-    dl_train, dl_val, dl_test, class_to_idx = get_dataloaders(manifest_path, batch_size=batch_size, img_size=img_size)
+    Args:
+        model: már head-csereált modell (freeze_backbone ELŐTT)
+        model_name: 'mobilenet_v3_small', stb. – a freeze/unfreeze segédletekhez
+        label: checkpoint fájlnév prefix
 
-    from src.models import get_efficientnet_b0
-    model = get_efficientnet_b0(num_classes=len(class_to_idx), pretrained=True)
-    model = model.to(device)
+    Visszaad: metrics dict (history, best_val_acc stb.)
+    """
+    from src.models import freeze_backbone, unfreeze_last_blocks
 
-    # compute class weights
-    import pandas as pd
-    df = pd.read_csv(manifest_path)
-    counts = df[df['split'] == 'train']['class'].value_counts().sort_index()
-    # ensure order matches class_to_idx
-    counts = counts.reindex(sorted(counts.index))
-    freq = counts.values.astype(float)
-    class_weights = torch.tensor(1.0 / (freq + 1e-12), dtype=torch.float32).to(device)
+    ckpt_dir = PATHS["checkpoint_dir"]
+    criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
 
-    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    # ── Phase A ───────────────────────────────────────────────────────────
+    freeze_backbone(model, model_name)
+    if verbose:
+        from src.models import count_parameters
+        _, trainable = count_parameters(model)
+        print(f"[Phase A] {label}  trainable={trainable:,}")
 
-    best_val_loss = float('inf')
-    ckpt_path = Path('checkpoints')
-    ckpt_path.mkdir(parents=True, exist_ok=True)
+    optA = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                 lr=CFG["lr_phase_a"], weight_decay=1e-4)
+    schA = CosineAnnealingLR(optA, T_max=CFG["epochs_a"], eta_min=1e-5)
+    esA = EarlyStopping(patience=CFG["patience"],
+                        ckpt_path=ckpt_dir / f"best_{label}_phA.pth")
 
-    for epoch in range(1, epochs + 1):
-        t0 = time.time()
-        train_loss, train_acc = train_one_epoch(model, device, dl_train, criterion, optimizer)
-        val_loss, val_acc = evaluate(model, device, dl_val, criterion)
-        dt = time.time() - t0
-        print(f"Epoch {epoch}/{epochs}  train_loss={train_loss:.4f} train_acc={train_acc:.4f}  val_loss={val_loss:.4f} val_acc={val_acc:.4f}  ({dt:.1f}s)")
+    hist_a = []
+    for ep in range(1, CFG["epochs_a"] + 1):
+        tr_loss, tr_acc = train_one_epoch(model, train_loader, criterion, optA, device)
+        vl_loss, vl_acc, _, _ = evaluate(model, val_loader, criterion, device)
+        schA.step()
+        hist_a.append(dict(ep=ep, tr_loss=tr_loss, tr_acc=tr_acc,
+                           vl_loss=vl_loss, vl_acc=vl_acc, phase="A"))
+        if verbose:
+            print(f"  A ep{ep:>2}  tr={tr_acc:.3f}  vl={vl_acc:.3f}  vl_loss={vl_loss:.4f}")
+        if esA.step(vl_loss, model):
+            if verbose:
+                print("  Phase A early stop.")
+            break
+    esA.restore_best(model)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save({'model_state_dict': model.state_dict(), 'class_to_idx': class_to_idx}, ckpt_path / 'best_model.pth')
-            print(f"  ✅ Saved best checkpoint: {ckpt_path / 'best_model.pth'}")
+    # ── Phase B ───────────────────────────────────────────────────────────
+    unfreeze_last_blocks(model, model_name)
+    if verbose:
+        from src.models import count_parameters
+        _, trainable = count_parameters(model)
+        print(f"[Phase B] {label}  trainable={trainable:,}")
 
-    # final test eval
-    test_loss, test_acc = evaluate(model, device, dl_test, criterion)
-    print(f"Test: loss={test_loss:.4f} acc={test_acc:.4f}")
+    param_groups = [
+        {"params": filter(lambda p: p.requires_grad,
+                          _head_params(model, model_name)),
+         "lr": CFG["lr_phase_b_head"]},
+        {"params": filter(lambda p: p.requires_grad,
+                          _backbone_params(model, model_name)),
+         "lr": CFG["lr_phase_b_backbone"]},
+    ]
+    optB = AdamW(param_groups, weight_decay=1e-4)
+    schB = CosineAnnealingLR(optB, T_max=CFG["epochs_b"], eta_min=1e-6)
+    esB = EarlyStopping(patience=CFG["patience"],
+                        ckpt_path=ckpt_dir / f"best_{label}_phB.pth")
+
+    hist_b = []
+    for ep in range(1, CFG["epochs_b"] + 1):
+        tr_loss, tr_acc = train_one_epoch(model, train_loader, criterion, optB, device)
+        vl_loss, vl_acc, _, _ = evaluate(model, val_loader, criterion, device)
+        schB.step()
+        hist_b.append(dict(ep=ep, tr_loss=tr_loss, tr_acc=tr_acc,
+                           vl_loss=vl_loss, vl_acc=vl_acc, phase="B"))
+        if verbose:
+            print(f"  B ep{ep:>2}  tr={tr_acc:.3f}  vl={vl_acc:.3f}  vl_loss={vl_loss:.4f}")
+        if esB.step(vl_loss, model):
+            if verbose:
+                print("  Phase B early stop.")
+            break
+    esB.restore_best(model)
+
+    best_val_acc = max(h["vl_acc"] for h in hist_a + hist_b)
+    return {
+        "history": hist_a + hist_b,
+        "best_val_acc": best_val_acc,
+        "ckpt_phA": ckpt_dir / f"best_{label}_phA.pth",
+        "ckpt_phB": ckpt_dir / f"best_{label}_phB.pth",
+    }
 
 
-if __name__ == '__main__':
-    main(epochs=1)
+def _head_params(model: nn.Module, name: str):
+    """Iterál a classifier/fc paramétereken."""
+    if name in ("mobilenet_v3_small", "mobilenet_v3_large", "efficientnet_b0", "efficientnet_b3"):
+        return model.classifier.parameters()
+    elif name == "shufflenet_v2":
+        return list(model.fc.parameters()) + list(model.conv5.parameters())
+    elif name == "resnet50":
+        return model.fc.parameters()
+    return model.parameters()
+
+
+def _backbone_params(model: nn.Module, name: str):
+    """Iterál az összes NEM-head paraméteren (a felolvadt backbone részek)."""
+    if name in ("mobilenet_v3_small", "mobilenet_v3_large", "efficientnet_b0", "efficientnet_b3"):
+        return model.features.parameters()
+    elif name == "shufflenet_v2":
+        return model.stage4.parameters()
+    elif name == "resnet50":
+        return model.layer4.parameters()
+    return iter([])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpoint betöltés
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_checkpoint(model: nn.Module,
+                    ckpt_path: Path,
+                    device: torch.device) -> nn.Module:
+    """Checkpoint betöltése modellbe."""
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(state)
+    return model

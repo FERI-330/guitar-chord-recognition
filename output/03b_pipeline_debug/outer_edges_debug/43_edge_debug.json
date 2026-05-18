@@ -1,0 +1,32 @@
+{
+  "n_lines": 4,
+  "proj_vals": [
+    893.8668516861832,
+    1116.3959695945193,
+    1239.636532244031,
+    1245.8501544517194
+  ],
+  "gaps": [
+    222.52911790833616,
+    123.24056264951173,
+    6.213622207688331
+  ],
+  "median_gaps_right": 64.72709242860003,
+  "median_gaps_left": 172.88484027892395,
+  "img_span": 5045.353605050889,
+  "cluster_gap": 126.13384012627223,
+  "small_margin": 90.81636489091599,
+  "left_is_outlier": true,
+  "right_is_outlier": false,
+  "left_outlier_rejected": false,
+  "right_outlier_rejected": false,
+  "inner_width": 129.45418485720006,
+  "expansion_margin": 90.81636489091599,
+  "final_sep": 440.32309254345967,
+  "left_proj": 893.8668516861832,
+  "right_proj": 1334.1899442296428,
+  "left_cl_size": 3,
+  "right_cl_size": 3,
+  "expansion_strategy": "mixed",
+  "fallback_used": false
+}

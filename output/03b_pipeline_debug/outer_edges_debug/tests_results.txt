@@ -1,0 +1,10 @@
+[OK] T1 bal outlier: lo=10.0, ro=None
+[OK] T2 jobb outlier: lo=None, ro=400.0
+[OK] T3 nincs outlier: lo=None, ro=None
+[OK] T4 mindkét outlier: lo=5.0, ro=500.0
+[OK] T5 <3 elem → nincs outlier: lo=None, ro=None
+[OK] T6 _fit_cluster_edge centroid: proj=10.00 (vár=10.00)
+[OK] T7 _dbscan_1d 2 klaszter: labels=[0, 0, 0, 1, 1, 1]
+[OK] T8 spurious right outlier visszavonva: ro_raw=2812.0, rejected=True
+[OK] T9 _fit_extreme_edge bal: proj=195.5 (vár≈195.0)
+[OK] T10 1-elem inner no-reject: lo=None, ro=None

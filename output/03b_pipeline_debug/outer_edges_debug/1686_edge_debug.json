@@ -1,0 +1,40 @@
+{
+  "n_lines": 8,
+  "proj_vals": [
+    914.7848912590631,
+    927.9453082727152,
+    1000.8403034618092,
+    1006.2631293169978,
+    1073.9532707390313,
+    1169.3119639275872,
+    1484.3492519397098,
+    1487.7582406939587
+  ],
+  "gaps": [
+    13.160417013652136,
+    72.89499518909395,
+    5.422825855188648,
+    67.69014142203343,
+    95.35869318855589,
+    315.03728801212264,
+    3.408988754248867
+  ],
+  "median_gaps_right": 70.29256830556369,
+  "median_gaps_left": 70.29256830556369,
+  "img_span": 5175.458433800816,
+  "cluster_gap": 129.38646084502042,
+  "small_margin": 93.15825180841469,
+  "left_is_outlier": false,
+  "right_is_outlier": false,
+  "left_outlier_rejected": false,
+  "right_outlier_rejected": false,
+  "inner_width": 572.9733494348956,
+  "expansion_margin": 93.15825180841469,
+  "final_sep": 751.2247999177318,
+  "left_proj": 828.176629004917,
+  "right_proj": 1579.4014289226488,
+  "left_cl_size": 6,
+  "right_cl_size": 2,
+  "expansion_strategy": "extreme",
+  "fallback_used": false
+}

@@ -1,161 +1,252 @@
 # Guitar Chord Recognition
 
-This repository now uses a manifest-driven image classification pipeline for guitar chord recognition.
-The source of truth is `data/split_manifest.csv`, generated from `data/all/` by a stratified 70/15/15 split.
+Statikus képekből gitár akkord osztályozása 8 osztályra (A, B, C, D, E, F, G, No hand),
+297 képből álló adathalmazon.
 
-## Current workflow
+## Eredmények
 
-1. **EDA** (`notebooks/01_EDA.ipynb`): Explore the data, check for issues, and gather statistics.
-2. **Manifest** (`notebooks/02_split_manifest.ipynb`): Generate stratified 70/15/15 split from `data/all/`.
-3. **Preprocessing** (`notebooks/03_preprocessing.ipynb`): Set up PyTorch DataLoaders, augmentations, and class weights.
-4. **Data Leakage Check** (`notebooks/04_data_leakage_check.ipynb`): Verify no duplicate images between train/val/test using MD5 and pHash.
+| Modell | Val Acc | Test Acc | Test F1 |
+|---|---|---|---|
+| **MobileNetV3-Large** (Phase A+B) | 97.8% | **97.8%** | **0.971** |
+| SVM (Group B, 42 dim) | 95.6% | 91.1% | 0.907 |
 
-## Progress
+A CNN 6.7%-kal jobb a teszt halmazon → MobileNetV3-Large az ajánlott modell.
 
-- Edge-first fretboard homography implemented in `notebooks/03_feature_pipeline.ipynb` (detect_neck_lines + fit_corners_from_lines). The pipeline now prefers edges-derived corners and falls back to bbox-based homography.
-- Batch feature extraction completed: 297 images → features of dimension 139 (train 207, val 45, test 45). Sanity checks show no NaN/Inf in feature matrices.
-- Known issue: a non-trivial subset of images produce faulty/low-confidence fretboard detections (low `bund_det_rate` or `H_valid==0`). Diagnostics and triage are pending — see `JOURNAL.md` for details and next steps.
-- Next: export CSV of weak detections, triage failure modes, tune Hough/fallback parameters, and re-run batch extraction.
-5. **Model Training** – Choose a notebook based on your architecture:
-   - `notebooks/04a_baseline_ml.ipynb` – Scikit-learn baseline models (baseline_ml)
-   - `notebooks/04b_mobile_cnn.ipynb` – MobileNet v3 (small & large variants)
-   - `notebooks/04c_efficientnet_b0.ipynb` – EfficientNet-B0 (two training phases: phA, phB)
-   - `notebooks/04d_advanced_cnn.ipynb` – Advanced CNN architectures (two phases: phA, phB)
+---
 
-## Repository layout
+## Architektúra áttekintés
+
+A projekt kétszintű megközelítést alkalmaz:
+
+1. **V14 Pipeline** – OpenCV + MediaPipe alapú fogólap- és ujjhegy-detektálás, 56 dimenziós feature vektor előállítása
+2. **CNN Fine-tuning** – MobileNetV3-Large két-fázisú transfer learning nyers képeken
 
 ```
-.
-├── data/
-│   ├── all/                    # Source images (A, B, C, D, E, F, G, No hand)
-│   ├── training/               # Reference folder (legacy)
-│   ├── test/                   # Reference folder (legacy)
-│   └── split_manifest.csv      # Split source of truth (70/15/15)
-├── notebooks/
-│   ├── 01_EDA.ipynb
-│   ├── 02_split_manifest.ipynb
-│   ├── 03_preprocessing.ipynb
-│   ├── 04_data_leakage_check.ipynb
-│   ├── 04a_baseline_ml.ipynb
-│   ├── 04b_mobile_cnn.ipynb
-│   ├── 04c_efficientnet_b0.ipynb
-│   └── 04d_advanced_cnn.ipynb
-├── output/                     # All notebook outputs (figures, results)
-├── checkpoints/                # Trained model weights
-├── src/
-│   ├── models.py
-│   └── train.py
-├── environment.yaml
-├── requirements.txt
-├── JOURNAL.md
-└── README.md
+Kép → run_v14_pipeline → 56-dim feature → SVM (91.1%)
+    ↘ MobileNetV3-Large fine-tune    → CNN (97.8%)
 ```
 
-## Environment
+---
 
-The working environment is Python 3.10 with CUDA 12.4 support on an NVIDIA T500 GPU.
-PyTorch is intentionally installed via `pip` with cu124 wheels.
-
-Do not install PyTorch from conda channels in this project. Use the documented pip wheels instead:
+## Telepítés
 
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-```
-
-Recommended setup for the remaining scientific stack:
-
-```bash
+# Conda környezet létrehozása
+conda create -n guitar-chord python=3.10
 conda activate guitar-chord
-conda install -y -c conda-forge numpy pandas matplotlib seaborn scikit-learn pillow tqdm pygments jupyter ipykernel
+
+# PyTorch CUDA-val (pip, ne conda)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Tudományos stack
+conda install -y -c conda-forge numpy pandas matplotlib seaborn scikit-learn \
+    pillow tqdm jupyter ipykernel xgboost
+
+# MediaPipe
+pip install mediapipe
+
+# Jupyter kernel regisztrálás
 python -m ipykernel install --user --name guitar-chord --display-name "guitar-chord"
 ```
 
-## Data summary
+> **MediaPipe model**: `models/hand_landmarker.task` szükséges a pipeline futtatásához.
+> Töltsd le a [MediaPipe Models](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) oldalról.
 
-- Total images: 297
-- Classes: `A`, `B`, `C`, `D`, `E`, `F`, `G`, `No hand`
-- Split sizes: train 207, val 45, test 45
+---
 
-The manifest keeps the raw folder structure untouched and records the split assignment per image.
+## Adatstruktúra
 
-## Preprocessing decisions
-
-- Image size: 224 x 224
-- Normalization: ImageNet mean/std for transfer learning
-- Train augmentations: horizontal flip, color jitter, random rotation
-- Validation and test: resize + center crop + normalize
-- Batch size: 16
-- Class weighting: inverse frequency, with `G` and `No hand` weighted higher
-
-## Training entry points
-
-### Notebooks (Interactive)
-
-Each notebook handles a complete training pipeline with results saved to `output/<notebook_name>/`:
-
-- **`notebooks/04a_baseline_ml.ipynb`** – Scikit-learn baseline (LogisticRegression, SVM, RandomForest)
-- **`notebooks/04b_mobile_cnn.ipynb`** – MobileNet v3 small and large
-- **`notebooks/04c_efficientnet_b0.ipynb`** – EfficientNet-B0 with class-weighted loss
-- **`notebooks/04d_advanced_cnn.ipynb`** – Custom advanced CNN architecture
-
-Each notebook saves:
-- **Results**: `output/<name>/results.csv` with metrics (accuracy, precision, recall, F1)
-- **Checkpoints**: Best model weights to `checkpoints/best_<model>_ph{A,B}.pth`
-- **Figures**: Training curves, confusion matrices, class-wise metrics
-
-### Script
-
-`src/train.py` provides a reproducible training pipeline:
-
-```bash
-python -m src.train
+```
+data/
+├── all/                    # Forrás képek (297 db, 8 osztály)
+│   ├── A/                  # A akkord képek
+│   ├── B/
+│   ├── C/
+│   ├── D/
+│   ├── E/
+│   ├── F/
+│   ├── G/
+│   └── No hand/
+├── split_manifest.csv      # Stratified 70/15/15 split forrás
+└── features/
+    └── features_v14.npz    # 297×56 feature mátrix (V14 pipeline output)
 ```
 
-Or call it with explicit arguments:
+**Split:** 207 train / 45 val / 45 test (stratified, random_seed=42)
+
+---
+
+## `src/` modul struktúra
+
+Függőségi sorrend (alulról felfelé):
+
+```
+config → constants → geometry → hand_landmark → fretboard
+                                              ↓
+                              features → dataset → models → train → viz
+```
+
+| Modul | Felelősség |
+|---|---|
+| `config.py` | `CFG` és `PATHS` dict – egyetlen igazságforrás minden konstanshoz |
+| `constants.py` | `CFG`-ből számított domain-specifikus tömbök (fret-pozíciók, landmark indexek) |
+| `geometry.py` | OpenCV fretboard geometria: Canny, Hough, trapézoid detektálás, perspective warp |
+| `hand_landmark.py` | MediaPipe kézdetektálás, landmark projekció, ujjmaszk |
+| `fretboard.py` | `run_v14_pipeline` orchestrátor (15 lépéses pipeline) |
+| `features.py` | 56-dim feature vektor összeállítás, batch extrakció, NPZ mentés/betöltés |
+| `dataset.py` | PyTorch `Dataset`, `DataLoader`, augmentációk, class weight számítás |
+| `models.py` | CNN builder dispatcher (`build_model`), freeze/unfreeze segédletek |
+| `train.py` | `EarlyStopping`, `train_one_epoch`, `evaluate`, `train_two_phase` |
+| `viz.py` | Pipeline és training vizualizáció (pipeline overlay, training görbék, scatter plotok) |
+
+---
+
+## V14 Pipeline részletei
+
+A `run_v14_pipeline` 15 lépéses pipeline:
+
+1. **Canny** éldetektálás (ujjmaszk alapú szűréssel)
+2. **Hough** vonaldetektálás
+3. **Nyakszög** meghatározás (landmark anchor fallback-kel)
+4. **Vonalak szétválasztása** (hossz szerint)
+5. **Külső élek** keresése (fogólap bal/jobb széle)
+6. **Trapézoid** sarokpontok meghatározása
+7. **Trapézoid validálás** (aspect ≥ 4.0, area_frac ∈ [0.010, 0.50], edge_angle_diff ≤ 15°)
+8. **Perspective warp** → 600×80 px kanonikus tér
+9. **Nut detektálás** + anchor override
+10. **Nut-trim + re-warp**
+11. **Bundvonalak** detektálása a kanonikus képen
+12. **Ujjpár-szuppresszió** (dupla éldetek eltávolítása)
+13. **17.817-es bund-szabály illesztés** (RANSAC-szerű)
+14. **Ujjhegy-vetítés** a kanonikus térbe
+15. **Feature vektor** összeállítás (56 dim)
+
+**Pipeline ok-rate:** 248/297 = 83.5%
+
+### Feature vektor (56 dim)
+
+| Csoport | Dim | Tartalom |
+|---|---|---|
+| B | 42 | Wrist-normalized landmark x,y (21 pont × 2) |
+| D | 2 | Detektálási flagek (hand_detected, fretboard_detected) |
+| F | 2 | Nyakszög cos/sin |
+| G | 5 | Bund-index per ujj (normalizált, 0=nem detektált) |
+| H | 5 | Húr-pozíció per ujj (normalizált, 0=nem detektált) |
+
+> **ok=False policy:** Group B megmarad (ha kéz látható), G/H = 0, D = (1, 0), F = 0.
+
+---
+
+## Notebookok
+
+| Notebook | Cél |
+|---|---|
+| `01_EDA.ipynb` | Dataset profilozás, osztályeloszlás, képminőség vizsgálat |
+| `02_split_manifest.ipynb` | Stratified 70/15/15 split generálása |
+| `03_pipeline.ipynb` | Batch V14 pipeline futtatás, `features_v14.npz` mentés, failure triage |
+| `04_feature_analysis.ipynb` | PCA, t-SNE, korreláció, group ablation |
+| `05a_baseline_ml.ipynb` | SVM / RF / XGBoost baseline a feature vektoron |
+| `05b_cnn_finetune.ipynb` | MobileNetV3 két-fázisú fine-tuning |
+| `06_evaluation.ipynb` | **Egyetlen** hely ahol a test set betöltődik – végső összehasonlítás |
+
+> **Test set védelem:** a test splitet kizárólag `06_evaluation.ipynb` tölti be.
+
+---
+
+## Inference – egy kép kiértékelése
+
+### CNN (ajánlott, 97.8% teszt acc)
 
 ```python
-from src.train import main
+import torch
+from src.config import CFG, PATHS
+from src.models import build_model
+from src.train import load_checkpoint
+from src.dataset import get_transforms
+from PIL import Image
 
-main(
-    manifest_path="data/split_manifest.csv",
-    batch_size=16,
-    img_size=224,
-    epochs=50,
-    model_name="efficientnet_b0",
-)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+CLASSES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'No hand']
+
+model = build_model('mobilenet_v3_large', num_classes=8).to(DEVICE)
+model = load_checkpoint(model, PATHS['checkpoint_dir'] / 'best_mobilenet_v3_large_phB.pth', DEVICE)
+model.eval()
+
+transform = get_transforms('val')
+img = transform(Image.open('data/all/A/kep.jpg').convert('RGB')).unsqueeze(0).to(DEVICE)
+
+with torch.no_grad():
+    logits = model(img)
+    pred = logits.argmax(1).item()
+
+print(f'Predikció: {CLASSES[pred]}')
 ```
 
-## Model baselines
+### SVM (GPU nélkül, 91.1% teszt acc)
 
-Multiple architectures are trained and compared:
+```python
+import pickle
+import numpy as np
+from src.fretboard import run_v14_pipeline
+from src.features import assemble_feature_vector
 
-| Architecture | Checkpoint(s) | Notes |
-|--------------|--------------|-------|
-| **Baseline ML** | `baseline_ml/` | Scikit-learn models (baseline for comparison) |
-| **MobileNet v3** | `best_MobSmall_phA.pth`, `best_MobSmall_phB.pth`, `best_MobLarge_phA.pth`, `best_MobLarge_phB.pth` | Lightweight CNN (small: 2.5M params, large: 5.4M params) |
-| **ShuffleNet v2** | `shufflenet_v2_x1_0.pth`, `best_shuffle_phA.pth`, `best_shuffle_phB.pth` | Efficient architecture optimized for mobile |
-| **EfficientNet-B0** | `best_EfficientNet_phA.pth`, `best_EfficientNet_phB.pth` | Balanced accuracy/efficiency baseline |
-| **Advanced CNN** | `best_AdvancedCNN_phA.pth`, `best_AdvancedCNN_phB.pth` | Custom deeper architecture for higher capacity |
+with open('checkpoints/best_ml_model.pkl', 'rb') as f:
+    ml_data = pickle.load(f)
+svm = ml_data['model']
 
-**Training Phases:**
-- **Phase A (phA):** Initial training on full dataset
-- **Phase B (phB):** Fine-tuning or transfer learning continuation
+result = run_v14_pipeline({'path': 'data/all/A/kep.jpg', 'class': 'A'})
+feat = assemble_feature_vector(result)
+B_cols = list(range(42))
 
-## Outputs
+pred_label = svm.predict(feat[B_cols].reshape(1, -1))[0]
+print(f'Predikció: {pred_label}')
+```
 
-- **Notebook outputs**: Figures, metrics, and results saved under `output/<notebook_name>/`
-- **Model checkpoints**: Best weights from each architecture/phase saved to `checkpoints/best_<model>_ph{A,B}.pth`
-- **Development log**: See `JOURNAL.md` for implementation decisions, hyperparameters, and debugging notes
+---
 
-## Notes
+## Vizualizáció (src/viz.py)
 
-- **Data source**: `data/all/` (297 images across 8 classes)
-- **Split source of truth**: `data/split_manifest.csv` (generated by `02_split_manifest.ipynb`)
-- **Legacy folders**: `data/training/` and `data/test/` remain for reference only—they are not used by the new manifest-based pipeline
-- **Reproducibility**: All notebooks use `random_state=42` for deterministic splits and initialization
-- **PyTorch setup**: Install PyTorch via pip with CUDA support to avoid conda libtorch conflicts:
-  ```bash
-  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-  ```
-- **Data leakage**: Run `04_data_leakage_check.ipynb` to verify train/val/test independence using MD5 and pHash
-- **Detailed log**: See `JOURNAL.md` for development decisions, hyperparameter choices, and debugging notes
+```python
+from src.viz import draw_pipeline_result, plot_training_history
+
+# Pipeline eredmény megjelenítése
+result = run_v14_pipeline({'path': 'data/all/A/kep.jpg', 'class': 'A'})
+fig = draw_pipeline_result(result)
+fig.savefig('output/pipeline_demo.png', dpi=130)
+
+# Training görbék
+import json
+with open('output/05b_cnn_finetune/best_cnn_meta.json') as f:
+    meta = json.load(f)
+fig = plot_training_history(meta['history'], title='MobileNetV3-Large')
+```
+
+---
+
+## Checkpointok
+
+| Fájl | Leírás |
+|---|---|
+| `checkpoints/best_mobilenet_v3_large_phB.pth` | **Legjobb modell** – MobileNetV3-Large Phase B |
+| `checkpoints/best_mobilenet_v3_large_phA.pth` | MobileNetV3-Large Phase A |
+| `checkpoints/best_mobilenet_v3_small_phB.pth` | MobileNetV3-Small Phase B (91.1% val) |
+| `checkpoints/best_ml_model.pkl` | Legjobb ML modell – SVM_B (sklearn pickle) |
+
+---
+
+## Környezet
+
+- Python 3.10, CUDA 12.4, NVIDIA T500 GPU
+- PyTorch: pip wheels (ne conda channels – libtorch konfliktus)
+- Reprodukálhatóság: `random_seed=42` minden notebookban és `src/config.py`-ban
+
+---
+
+## Fejlesztési napló
+
+Részletes fejlesztési döntések, hibajavítások és kísérleti eredmények: [JOURNAL.md](JOURNAL.md)
+
+Főbb mérföldkövek:
+- V14 pipeline: `validate_trapezoid` `hand_inside` ellenőrzés eltávolítva (49% false-reject → 16.5%)
+- Feature vektor: 139 dim → 56 dim (Group B + D + F + G + H)
+- CNN győz: +6.7% teszt acc a legjobb SVM felett → CNN ajánlott
