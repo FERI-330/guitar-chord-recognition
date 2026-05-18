@@ -4,9 +4,15 @@ src/fretboard.py
 Teljes run_v14_pipeline orchestrátor + validálók + suppress.
 
 Forrás: 03c_pipeline_fixes_design.ipynb (V14), cellák 23, 25, 27.
+
+Plug-and-Play bunddetektáló architektúra:
+  FretDetectorInterface  – ABC, közös interfész
+  GeometricFretDetector  – meglévő Hough+step8 logika (default)
+  IntensityFretDetector  – Sobel-X gradiens csúcsdetektálás + step8
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import Optional
 
 import cv2
@@ -153,18 +159,217 @@ def _choose_nut_side(anchor: Optional[dict],
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bunddetektáló architektúra – FretDetectorInterface + implementációk
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_empty_fit() -> dict:
+    """Üres fit dict – azonos struktúrával mint step8_fit_fret_rule failure."""
+    return {
+        "matched_frets": {}, "predicted_x": {},
+        "offset": 0.0, "scale": float(CFG["canonical_w"]),
+        "inlier_count": 0, "inlier_rate": 0.0,
+        "avg_residual_px": float("nan"),
+        "visible_range": (0, 0),
+        "fit_method": "none", "run_len": 0,
+        "fit_direction": "forward",
+        "coverage_ratio": 0.0, "n_visible": 0, "score": 0.0,
+        "nut_anchored": False,
+        "inlay_score": 0.0, "matched_inlays": {},
+        "method": "none",
+    }
+
+
+class FretDetectorInterface(ABC):
+    """Közös interfész minden bunddetektáló implementációhoz.
+
+    A "Zero-Break" garancia alapja: ``detect()`` mindig ugyanazokat a kulcsokat
+    adja vissza, függetlenül a konkrét algoritmustól.  Így ``run_v14_pipeline``
+    és ``assemble_feature_vector`` nem veszi észre a cserét.
+
+    Kötelező visszatérési kulcsok:
+        ``fit``            – dict, azonos struktúra mint step8_fit_fret_rule output
+        ``fret_xs_raw``    – list[float], nyers detektált x-pozíciók
+        ``fret_xs_filt``   – list[float], szűrt pozíciók
+        ``removed_pairs``  – list[tuple], eltávolított párok
+        ``method``         – str, 'geometric' | 'intensity'
+    """
+
+    @abstractmethod
+    def detect(self, canon_bgr: np.ndarray, nut: Optional[dict] = None) -> dict:
+        """Bundpozíciók detektálása a kanonikus képen.
+
+        Args:
+            canon_bgr: kanonikus perspektíva-warped BGR kép (600×80 px).
+            nut:       nut detektálás eredménye (``step6b_find_nut`` kimenete),
+                       vagy ``None`` ha nem elérhető.
+
+        Returns:
+            Dict kötelező kulcsokkal: fit, fret_xs_raw, fret_xs_filt,
+            removed_pairs, method.
+        """
+
+
+class GeometricFretDetector(FretDetectorInterface):
+    """Eredeti V14 Hough-alapú bunddetektálás (step7 + suppress + step8).
+
+    Ez az osztály kizárólag átcsomagolja a meglévő ``geometry.py`` függvényeket –
+    semmi logikát nem implementál újra.  Alapértelmezett detektor a pipeline-ban.
+    """
+
+    def detect(self, canon_bgr: np.ndarray, nut: Optional[dict] = None) -> dict:
+        fret_xs_raw = step7_fret_lines_canonical(canon_bgr)
+        fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
+
+        nut_side = nut["side"] if nut else None
+        try:
+            fit = step8_fit_fret_rule(
+                fret_xs_filt,
+                nut_anchored=(nut_side is not None),
+                nut_side=nut_side,
+            )
+        except Exception as exc:
+            print(f"  [GeometricFretDetector] step8 hiba: {exc}")
+            fit = _make_empty_fit()
+
+        fit["method"] = "geometric"
+        return {
+            "fit":           fit,
+            "fret_xs_raw":   fret_xs_raw,
+            "fret_xs_filt":  fret_xs_filt,
+            "removed_pairs": removed_pairs,
+            "method":        "geometric",
+        }
+
+
+class IntensityFretDetector(FretDetectorInterface):
+    """Intenzitás-gradiens alapú bunddetektálás (Sobel-X csúcsdetektálás + step8).
+
+    A Hough-transzformáció helyett a kanonikus kép oszloponkénti Sobel-X
+    gradiens összegéből generál 1D profilt, majd ``scipy.signal.find_peaks``-kel
+    detektál csúcsokat.  A 17.817-es illesztést ugyanúgy a meglévő
+    ``step8_fit_fret_rule`` végzi – a matematikai logika nem kerül
+    újraimplementálásra ebben az osztályban.
+
+    Előnyök a geometriai módszerrel szemben:
+    - Zajos / alacsony kontrasztú képeken jobban teljesíthet
+    - Nem függ a Hough küszöb paramétereinek helyes beállításától
+    - A gradiens-profil inspektálható (``result['profile']`` kulcs)
+
+    Hátrányok:
+    - Érzékenyebb ujj-okklúzióra (az ujjak is gradienst okoznak)
+    - A ``suppress_pairs`` opció segít, de nem eliminálja teljesen
+    """
+
+    def __init__(
+        self,
+        sobel_ksize: int = 3,
+        smooth_sigma: float = 1.5,
+        peak_height: float = 0.12,
+        peak_distance: int = 7,
+        peak_prominence: float = 0.06,
+        peak_max_width: float = 14.0,
+        suppress_pairs: bool = True,
+    ) -> None:
+        """
+        Args:
+            sobel_ksize:      OpenCV Sobel kernel mérete (1, 3 vagy 5).
+            smooth_sigma:     Gaussian simítás sigma értéke a gradiens-profilra.
+            peak_height:      Minimális csúcsmagasság (normalizált 0–1 skálán).
+            peak_distance:    Minimális csúcs–csúcs távolság (px).
+            peak_prominence:  Minimális csúcs prominencia.
+            peak_max_width:   Maximális csúcsszélesség (px); a szélesebb csúcsok
+                              valószínűleg ujjak, nem bundok.
+            suppress_pairs:   Ujjpár-szuppresszió alkalmazása (mint a geometriai
+                              úton, ``suppress_finger_pairs``).
+        """
+        self.sobel_ksize    = sobel_ksize
+        self.smooth_sigma   = smooth_sigma
+        self.peak_height    = peak_height
+        self.peak_distance  = peak_distance
+        self.peak_prominence = peak_prominence
+        self.peak_max_width = peak_max_width
+        self.suppress_pairs = suppress_pairs
+
+    def gradient_profile(self, canon_bgr: np.ndarray) -> np.ndarray:
+        """Normalizált oszloponkénti Sobel-X gradiens összeg.
+
+        Nyilvános metódus: vizualizálható a ``PipelineVisualizer``-ből.
+
+        Returns:
+            1D float array, hossza CANONICAL_W (600), értékek [0, 1].
+        """
+        from scipy.ndimage import gaussian_filter1d
+
+        gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        sobel = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=self.sobel_ksize)
+        profile = np.abs(sobel).sum(axis=0)
+        if self.smooth_sigma > 0:
+            profile = gaussian_filter1d(profile, sigma=self.smooth_sigma)
+        max_val = float(profile.max())
+        if max_val > 1e-3:
+            profile = profile / max_val
+        return profile.astype(np.float32)
+
+    def detect(self, canon_bgr: np.ndarray, nut: Optional[dict] = None) -> dict:
+        from scipy.signal import find_peaks
+
+        profile = self.gradient_profile(canon_bgr)
+
+        peak_idxs, _ = find_peaks(
+            profile,
+            height=self.peak_height,
+            distance=self.peak_distance,
+            prominence=self.peak_prominence,
+            width=(0.0, self.peak_max_width),
+        )
+
+        fret_xs_raw = [float(i) for i in peak_idxs]
+
+        if self.suppress_pairs:
+            fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
+        else:
+            fret_xs_filt, removed_pairs = fret_xs_raw, []
+
+        nut_side = nut["side"] if nut else None
+        try:
+            fit = step8_fit_fret_rule(
+                fret_xs_filt,
+                nut_anchored=(nut_side is not None),
+                nut_side=nut_side,
+            )
+        except Exception as exc:
+            print(f"  [IntensityFretDetector] step8 hiba: {exc}")
+            fit = _make_empty_fit()
+
+        fit["method"] = "intensity"
+        return {
+            "fit":           fit,
+            "fret_xs_raw":   fret_xs_raw,
+            "fret_xs_filt":  fret_xs_filt,
+            "removed_pairs": removed_pairs,
+            "method":        "intensity",
+            "profile":       profile,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # run_v14_pipeline – a fő orchestrátor
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_v14_pipeline(img_entry: dict,
-                     landmarker=None) -> dict:
+                     landmarker=None,
+                     fret_detector: Optional[FretDetectorInterface] = None) -> dict:
     """Egy képre lefuttatja a V14 pipeline-t.
 
     Args:
-        img_entry: dict {'path', 'class', ...} – általában manifest sor.
-        landmarker: HandLandmarker vagy None (ilyenkor lazy singleton).
+        img_entry:      dict {'path', 'class', ...} – általában manifest sor.
+        landmarker:     HandLandmarker vagy None (ilyenkor lazy singleton).
+        fret_detector:  ``FretDetectorInterface`` példány, vagy ``None``.
+                        ``None`` esetén ``GeometricFretDetector()`` (backward
+                        compatible, semmi nem törik el).
 
     Visszaad: dict minden közbülső artefaktummal + 'ok' flag.
+    Plusz kulcs az alap result dicthez: 'fret_detector_method' str.
     """
     if landmarker is None:
         landmarker = _get_landmarker()
@@ -175,6 +380,7 @@ def run_v14_pipeline(img_entry: dict,
         "fname": img_entry.get("fname", str(img_entry["path"]).split("/")[-1]),
         "ok": False,
         "invalid_reason": None,
+        "fret_detector_method": "none",
     }
 
     # ── Kép betöltés ────────────────────────────────────────────────────────
@@ -295,33 +501,27 @@ def run_v14_pipeline(img_entry: dict,
         out["corners_trim"] = corners_trim
         out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
 
-    # ── 12. Bundvonalak detektálása ─────────────────────────────────────────
-    fret_xs_raw = step7_fret_lines_canonical(out["canon"])
-    out["fret_xs_raw"] = fret_xs_raw
-
-    # ── 13. Ujjpár szuppresszió ─────────────────────────────────────────────
-    fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
-    out["fret_xs_filt"] = fret_xs_filt
-    out["removed_pairs"] = removed_pairs
-
-    # ── 14. 17.817-es illesztés ─────────────────────────────────────────────
+    # ── 12–14. Bunddetektálás (cserélhető detektor) ─────────────────────────
+    _detector = fret_detector if fret_detector is not None else GeometricFretDetector()
     try:
-        nut_side = nut["side"] if nut else None
-        fit = step8_fit_fret_rule(
-            fret_xs_filt,
-            nut_anchored=(nut_side is not None),
-            nut_side=nut_side,
-        )
-        out["fit"] = fit
+        det_result = _detector.detect(out["canon"], nut=out.get("nut"))
+        out["fret_xs_raw"]          = det_result["fret_xs_raw"]
+        out["fret_xs_filt"]         = det_result["fret_xs_filt"]
+        out["removed_pairs"]        = det_result["removed_pairs"]
+        out["fit"]                  = det_result["fit"]
+        out["fret_detector_method"] = det_result.get("method", "unknown")
+        # IntensityFretDetector esetén a gradiens-profil is elérhető
+        if "profile" in det_result:
+            out["intensity_profile"] = det_result["profile"]
     except Exception as exc:
         out["fit"] = None
-        out["invalid_reason"] = f"step8_failed: {exc}"
+        out["invalid_reason"] = f"fret_detection_failed: {exc}"
         return out
 
     # ── 15. Ujjhegy vetítés (ha van landmark és H) ──────────────────────────
     h_img, w_img = img.shape[:2]
     out["fingertips"] = step9_project_fingertips(
-        landmarks, out["H"], w_img, h_img, fit=fit
+        landmarks, out["H"], w_img, h_img, fit=out.get("fit")
     )
 
     out["ok"] = True
