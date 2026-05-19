@@ -24,6 +24,21 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
+def load_manifest(path: Optional[Path] = None) -> pd.DataFrame:
+    """Betölti a manifest CSV-t és a 'path' oszlopot Path objektummá alakítja.
+
+    Args:
+        path: opcionális felülírás; None esetén PATHS['manifest'] értékét használja.
+
+    Returns:
+        pd.DataFrame 'path' (Path), 'class', 'split' oszlopokkal.
+    """
+    p = Path(path) if path is not None else Path(PATHS["manifest"])
+    df = pd.read_csv(p)
+    df["path"] = df["path"].apply(Path)
+    return df
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Transzformációk
 # ─────────────────────────────────────────────────────────────────────────────
