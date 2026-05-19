@@ -1190,3 +1190,272 @@ def plot_scatter_2d(
     if show:
         plt.show()
     return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROI összehasonlítás – sandbox vizualizációk
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ROI_FIG_SQUARE   = (14, 10)
+_ROI_FIG_DPI      = 120
+_DIAG_FIGSIZE     = (20, 5)
+_DIAG_NUT_ZOOM    = 0.30    # a kanonikus kép mekkora töredékét zoom-oljuk
+_DIAG_PEAK_HEIGHT = 0.12    # IntensityFretDetector alapértelmezett peak_height
+
+
+def _fill_roi_axes(axes_2x3: np.ndarray,
+                   img_bgr: np.ndarray,
+                   img_path,
+                   cls_label: str,
+                   preprocessor=None,
+                   run_results=None) -> tuple:
+    """Kitölti a 2×3-as axes tömböt egy kép három ROI-stratégiájával.
+
+    Ha run_results=(r_old, r_mp, r_int) megadott, kihagyja az újrafuttatást.
+    Visszaad: (r_old, r_mp, r_int).
+    """
+    from src.roi import roi_old_stable, roi_mediapipe_guided, roi_intensity_based
+
+    if run_results is not None:
+        r_old, r_mp, r_int = run_results
+    else:
+        r_old = roi_old_stable(img_bgr)
+        r_mp  = roi_mediapipe_guided(img_path, preprocessor=preprocessor)
+        r_int = roi_intensity_based(img_bgr)
+
+    strategies = [
+        (r_old, "Old Stable\n(Hough, nincs MP)",    "#e74c3c"),
+        (r_mp,  "MediaPipe Guided\n(anchor + mask)", "#2ecc71"),
+        (r_int, "Intensity-based\n(sor-projekció)",  "#3498db"),
+    ]
+    h_img, w_img = img_bgr.shape[:2]
+
+    for col, (res, label, color) in enumerate(strategies):
+        ax_top = axes_2x3[0, col]
+        ax_bot = axes_2x3[1, col]
+
+        ax_top.imshow(img_bgr[:, :, ::-1])
+        ax_top.set_title(label, fontsize=9, color=color, fontweight="bold")
+        ax_top.axis("off")
+
+        if res is not None and res.get("ok"):
+            trap = res.get("trap")
+            if trap is not None:
+                corners = trap["corners_px"].reshape(-1, 2)
+                poly = plt.Polygon(corners, fill=False,
+                                   edgecolor=color, linewidth=2, linestyle="--")
+                ax_top.add_patch(poly)
+                for (cx, cy) in corners:
+                    ax_top.plot(cx, cy, "o", color=color, markersize=5)
+
+            if res.get("y1") is not None:
+                rect = plt.Rectangle(
+                    (0, res["y1"]), w_img, res["y2"] - res["y1"],
+                    fill=False, edgecolor=color, linewidth=2)
+                ax_top.add_patch(rect)
+
+            fmask = res.get("finger_mask")
+            if fmask is not None and fmask.any():
+                overlay = np.zeros((*fmask.shape, 4), dtype=np.uint8)
+                overlay[fmask > 0] = [255, 165, 0, 60]
+                ax_top.imshow(overlay)
+
+            nut   = res.get("nut")
+            H_inv = res.get("H_inv")
+            if nut is not None and H_inv is not None:
+                nut_x = float(nut["nut_x"])
+                pts = np.array([[nut_x, 0], [nut_x, CANONICAL_H - 1]],
+                               dtype=np.float32).reshape(-1, 1, 2)
+                orig_pts = cv2.perspectiveTransform(pts, H_inv).reshape(-1, 2)
+                ax_top.plot(orig_pts[:, 0], orig_pts[:, 1],
+                            "-", color="yellow", linewidth=2.5)
+        else:
+            reason = (res.get("invalid_reason") if res else None) or "None"
+            ax_top.text(0.5, 0.5, f"SIKERTELEN\n{reason}",
+                        transform=ax_top.transAxes, ha="center", va="center",
+                        fontsize=9, color="red",
+                        bbox=dict(facecolor="black", alpha=0.5, pad=3))
+
+        canon = res.get("canon") if res else None
+        if canon is not None:
+            ax_bot.imshow(canon[:, :, ::-1], aspect="auto")
+            ax_bot.set_title("Kanonikus (600×80 px)", fontsize=8)
+            ax_bot.axis("off")
+            nut = res.get("nut")
+            if nut is not None:
+                ax_bot.axvline(x=nut["nut_x"], color="yellow",
+                               linewidth=2, linestyle="--")
+        else:
+            ax_bot.set_visible(False)
+
+    return r_old, r_mp, r_int
+
+
+def plot_roi_comparison(img_bgr: np.ndarray,
+                         img_path,
+                         cls_label: str,
+                         preprocessor=None,
+                         show: bool = True) -> plt.Figure:
+    """Önálló 2×3-as összehasonlító ábra a három ROI stratégiáról."""
+    img_name = Path(img_path).name if hasattr(img_path, "name") else str(img_path)
+    fig, axes = plt.subplots(2, 3, figsize=_ROI_FIG_SQUARE, dpi=_ROI_FIG_DPI)
+    r_old, r_mp, r_int = _fill_roi_axes(axes, img_bgr, img_path,
+                                          cls_label, preprocessor)
+    ok_flags = (
+        f"Old: {'OK' if r_old and r_old.get('ok') else 'FAIL'} | "
+        f"MP: {'OK' if r_mp  and r_mp .get('ok') else 'FAIL'} | "
+        f"Int: {'OK' if r_int and r_int.get('ok') else 'FAIL'}"
+    )
+    fig.suptitle(f"[{cls_label}]  {img_name}  —  {ok_flags}",
+                 fontsize=10, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_diagnostic_row(img_path,
+                         cls_label: str,
+                         preprocessor=None,
+                         fret_detector=None,
+                         peak_height: float = _DIAG_PEAK_HEIGHT,
+                         show: bool = True) -> plt.Figure:
+    """Egy képhez 1×4 diagnosztikai sort rajzol.
+
+    Columns:
+      0 – Kanonikus ROI (600×80 px)
+      1 – Nut Focus (bal/jobb ~30% crop, 3× zoom + nut-vonal)
+      2 – Signal Analysis (1D Sobel-X profil, Nut★ + Fret▲)
+      3 – Final Detection (teljes ROI, nut sárga + fret zöld vonalak)
+
+    Forrás: 08_detection_sandbox.ipynb Cell 13.
+    """
+    from src.fretboard import run_v14_pipeline, IntensityFretDetector
+
+    img_name = Path(img_path).name
+
+    entry = {"path": img_path, "class": cls_label}
+    res   = run_v14_pipeline(entry, preprocessor=preprocessor)
+
+    pipeline_ok = res.get("ok", False)
+    canon  = res.get("canon")
+    nut    = res.get("nut")
+
+    _det = fret_detector if fret_detector is not None else IntensityFretDetector(
+        peak_height=peak_height
+    )
+    det     = None
+    profile = None
+    if pipeline_ok and canon is not None:
+        det     = _det.detect(canon, nut=nut)
+        profile = _det.gradient_profile(canon)
+
+    fret_xs    = det["fret_xs_filt"] if det else []
+    fret_count = len(fret_xs)
+    nut_x      = int(nut["nut_x"])  if nut  else None
+    nut_side   = nut.get("side", "?") if nut else "?"
+    nut_width  = nut.get("width_px", float("nan")) if nut else float("nan")
+
+    fig, axes = plt.subplots(1, 4, figsize=_DIAG_FIGSIZE, dpi=_ROI_FIG_DPI)
+
+    nut_str = (f"Nut: x={nut_x}px  FWHM={nut_width:.1f}px"
+               if nut else "Nut: NOT detected")
+    fig.suptitle(
+        f"[{cls_label}]  {img_name}   —   {nut_str}   |   Frets detected: {fret_count}",
+        fontsize=10, fontweight="bold", y=1.02,
+    )
+
+    # Col 0: Kanonikus ROI
+    ax0 = axes[0]
+    if canon is not None:
+        ax0.imshow(canon[:, :, ::-1], aspect="auto")
+    else:
+        ax0.set_facecolor("#111111")
+        reason = res.get("invalid_reason", "ismeretlen hiba")
+        ax0.text(0.5, 0.5, f"Pipeline\nfailed\n{reason}",
+                 transform=ax0.transAxes, ha="center", va="center",
+                 color="tomato", fontsize=8)
+    ax0.set_title("Original ROI\n(600×80 px canonical)", fontsize=8)
+    ax0.axis("off")
+
+    # Col 1: Nut Focus Zoom
+    ax1 = axes[1]
+    if canon is not None:
+        cw     = canon.shape[1]
+        zoom_w = int(cw * _DIAG_NUT_ZOOM)
+        x0z    = 0        if nut_side == "left"  else cw - zoom_w
+        x1z    = zoom_w   if nut_side == "left"  else cw
+        ax1.imshow(canon[:, x0z:x1z, ::-1], aspect="auto")
+        if nut_x is not None:
+            ax1.axvline(x=nut_x - x0z, color="yellow", linewidth=2.5)
+            ax1.set_title(
+                f"Nut Focus (~300% zoom)\n{nut_side.upper()}  x={nut_x}px  FWHM={nut_width:.1f}px",
+                fontsize=8)
+        else:
+            ax1.text(0.5, 0.5, "Nut NOT\ndetected",
+                     transform=ax1.transAxes, ha="center", va="center",
+                     color="red", fontsize=12, fontweight="bold",
+                     bbox=dict(facecolor="black", alpha=0.65, pad=4))
+            ax1.set_title("Nut Focus (~300% zoom)\n—", fontsize=8)
+    else:
+        ax1.set_facecolor("#111111")
+        ax1.text(0.5, 0.5, "No ROI", transform=ax1.transAxes,
+                 ha="center", va="center", color="#888888", fontsize=10)
+        ax1.set_title("Nut Focus (~300% zoom)", fontsize=8)
+    ax1.axis("off")
+
+    # Col 2: Signal Analysis
+    ax2 = axes[2]
+    if profile is not None:
+        xs = np.arange(len(profile))
+        ax2.plot(xs, profile, color="steelblue", linewidth=1.1, alpha=0.85,
+                 label="Sobel-X profil")
+        ax2.axhline(y=peak_height, color="#888888", linestyle=":",
+                    linewidth=0.9, label=f"height={peak_height}")
+        if nut_x is not None:
+            nv = float(profile[min(nut_x, len(profile) - 1)])
+            ax2.axvline(x=nut_x, color="gold", linewidth=1.8)
+            ax2.plot(nut_x, nv, "*", color="gold", markersize=13, zorder=6,
+                     label=f"Nut ★ x={nut_x}")
+        for i, fx in enumerate(fret_xs):
+            fv = float(profile[min(int(fx), len(profile) - 1)])
+            ax2.axvline(x=fx, color="#2ecc71", linewidth=0.9, alpha=0.8)
+            ax2.plot(fx, fv, "^", color="#2ecc71", markersize=7, zorder=5,
+                     label="Fret ▲" if i == 0 else "")
+        ax2.set_xlim(0, len(profile))
+        ax2.set_ylim(bottom=0)
+        ax2.set_title(f"Signal Analysis\n{fret_count} fret | peak_h={peak_height}", fontsize=8)
+        ax2.set_xlabel("Kanonikus x [px]", fontsize=7)
+        ax2.set_ylabel("Norm. gradiens", fontsize=7)
+        ax2.tick_params(labelsize=6)
+        ax2.legend(fontsize=6, loc="upper right", framealpha=0.7)
+        ax2.grid(alpha=0.25)
+    else:
+        ax2.text(0.5, 0.5, "No signal\navailable",
+                 transform=ax2.transAxes, ha="center", va="center",
+                 color="#888888", fontsize=10)
+        ax2.set_title("Signal Analysis", fontsize=8)
+
+    # Col 3: Final Detection
+    ax3 = axes[3]
+    if canon is not None:
+        ax3.imshow(canon[:, :, ::-1], aspect="auto")
+        if nut_x is not None:
+            ax3.axvline(x=nut_x, color="yellow", linewidth=2.5, label="Nut")
+        for i, fx in enumerate(fret_xs):
+            ax3.axvline(x=fx, color="#2ecc71", linewidth=1.5, alpha=0.9,
+                        label="Frets" if i == 0 else "")
+        if nut_x is not None or fret_xs:
+            ax3.legend(fontsize=7, loc="upper right", framealpha=0.75)
+        ax3.set_title(f"Final Detection\nNut + {fret_count} fret", fontsize=8)
+    else:
+        ax3.set_facecolor("#111111")
+        ax3.text(0.5, 0.5, "No ROI", transform=ax3.transAxes,
+                 ha="center", va="center", color="#888888", fontsize=10)
+        ax3.set_title("Final Detection", fontsize=8)
+    ax3.axis("off")
+
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
