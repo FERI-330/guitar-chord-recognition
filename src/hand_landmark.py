@@ -191,6 +191,46 @@ def build_finger_mask(img_shape: tuple,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Fogólap-közeli kézél meghatározás
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_fretboard_near_edge(landmarks: Optional[list],
+                            img_shape: tuple) -> Optional[tuple[float, float]]:
+    """A kéz gitárnyak felőli szélének pixel-koordinátái.
+
+    A fogón lévő kéznél az MCP-ízületek (5, 9, 13, 17) alkotják a gitár
+    felőli vonalat; a legkülső MCP-pont határolja azt a területet, ahol
+    a Nut még kereshető.  A csukló (0) iránya jelzi, melyik MCP-oldal
+    a gitártest felőli (és melyik a fejléc/nut felőli).
+
+    Visszaad: (x_px, y_px) pixel-koordináta, vagy None ha nincs landmark.
+    """
+    if landmarks is None or len(landmarks) < 18:
+        return None
+    h, w = img_shape[:2]
+    pts = np.array([[lx * w, ly * h] for (lx, ly, _) in landmarks])
+
+    wrist = pts[0]
+    mcp_idxs = [5, 9, 13, 17]
+    mcp_pts = pts[mcp_idxs]
+
+    # A fogólap iránya: csuklótól az MCP-centroid felé
+    mcp_center = mcp_pts.mean(axis=0)
+    neck_dir = mcp_center - wrist
+    neck_len = float(np.linalg.norm(neck_dir))
+    if neck_len < 1e-3:
+        return None
+    neck_dir = neck_dir / neck_len
+
+    # Minden MCP projekciója a nyak-irányra; a legkisebb projekciójú
+    # az a pont, amelyik a legközelebb van a gitár fejléc/nut oldalához
+    projs = [float(np.dot(pts[i] - wrist, neck_dir)) for i in mcp_idxs]
+    nearest_mcp_idx = mcp_idxs[int(np.argmin(projs))]
+    pt = pts[nearest_mcp_idx]
+    return (float(pt[0]), float(pt[1]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Nyakirány horgonyzás MediaPipe landmark alapján
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -332,8 +332,12 @@ class PipelineVisualizer:
         # ── 3. Nut oldal jelzése ───────────────────────────────────────────
         nut_side = direction or points.get("nut_side_hint")
         if nut_side is not None:
+            nut_info = points.get("nut") or {}
+            width_px = nut_info.get("width_px")
+            nut_label = (f"nut: {nut_side} w={width_px:.1f}px"
+                         if width_px is not None else f"nut: {nut_side}")
             cv2.putText(
-                vis, f"nut: {nut_side}", (10, 24),
+                vis, nut_label, (10, 24),
                 cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
                 self.neck_color, 1, cv2.LINE_AA,
             )
