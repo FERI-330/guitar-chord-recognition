@@ -592,8 +592,14 @@ def step6b_find_nut(canon_bgr: np.ndarray,
             fwhm = _measure_peak_fwhm(col_response, idx + offset)
             return idx, float(region[idx]), fwhm
 
-        # find_peaks a régión – top-N a magasság szerint
-        idxs, props = _find_peaks(region, height=0.0)
+        # find_peaks a régión – szélességi előszűrés + top-N a magasság szerint.
+        # A width= paraméter Nut vs. bund diszkriminációt végez közvetlenül:
+        # Nut FWHM ≫ fret FWHM (kutatás: Nut_width > 1.5 × Fret_width).
+        width_arg = (min_fwhm, max_fwhm) if max_fwhm is not None else (min_fwhm, None)
+        idxs, props = _find_peaks(region, height=0.0, width=width_arg)
+        if len(idxs) == 0:
+            # Lazabb fallback: csak minimális szélességre szűrve
+            idxs, props = _find_peaks(region, height=0.0, width=(min_fwhm, None))
         if len(idxs) == 0:
             idx = int(np.argmax(region))
             fwhm = _measure_peak_fwhm(col_response, idx + offset)
@@ -601,13 +607,12 @@ def step6b_find_nut(canon_bgr: np.ndarray,
 
         heights = region[idxs]
         top_n = idxs[np.argsort(heights)[::-1][:n_cand]]
-        # Szélességi szűrés: az első (legmagasabb) n_cand csúcs közül
-        # az első, amelynek min_fwhm <= FWHM <= max_fwhm (ujjak kizárása)
+        # Post-hoc FWHM-ellenőrzés a pontosabb mérővel (a find_peaks width≈FWHM de nem azonos)
         for ci in top_n:
             fwhm = _measure_peak_fwhm(col_response, int(ci) + offset)
             if fwhm >= min_fwhm and (max_fwhm is None or fwhm <= max_fwhm):
                 return int(ci), float(region[ci]), fwhm
-        # Ha egyik sem elég széles, visszaesünk a legmagasabbra
+        # Ha egyik sem felel meg a FWHM-tesztnek, visszaesünk a legmagasabbra
         ci = top_n[0]
         fwhm = _measure_peak_fwhm(col_response, int(ci) + offset)
         return int(ci), float(region[ci]), fwhm

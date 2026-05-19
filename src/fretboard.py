@@ -163,7 +163,17 @@ def _choose_nut_side(anchor: Optional[dict],
 
     h_img, w_img = img_shape[:2]
 
-    # ── Elsődleges: ujjhegy-irány ────────────────────────────────────────────
+    # ── Elsődleges: wrist.x vs index_mcp.x kép-koordinátában ────────────────
+    # Ha a csukló x > mutatóujj tő x → a kéz balra mutat → nut bal oldalt
+    # Közvetlenül a normalizált landmark koordinátákon működik, vetítés nélkül.
+    if landmarks is not None and len(landmarks) >= 6:
+        wrist_x     = float(landmarks[0][0])   # lm[0] = wrist
+        index_mcp_x = float(landmarks[5][0])   # lm[5] = index_mcp
+        side = "left" if wrist_x > index_mcp_x else "right"
+        print(f"  [nut_side] wrist.x={wrist_x:.3f} vs index_mcp.x={index_mcp_x:.3f} → {side}")
+        return side
+
+    # ── 2. Fallback: ujjhegy-irány a kanonikus térben ────────────────────────
     if landmarks is not None and len(landmarks) >= 21:
         wrist_lm = landmarks[0]
         wrist_pt = np.array([wrist_lm[0] * w_img, wrist_lm[1] * h_img, 1.0])
@@ -183,7 +193,7 @@ def _choose_nut_side(anchor: Optional[dict],
                 print(f"  [nut_side] tip_mean={mean_tip_cx:.0f} vs wrist={wrist_cx:.0f} → {side}")
                 return side
 
-    # ── Fallback: tenyér-centrum 50%-os küszöb ───────────────────────────────
+    # ── 3. Végső fallback: tenyér-centrum 50%-os küszöb ─────────────────────
     pc = anchor["palm_center_px"]
     pt = np.array([float(pc[0]), float(pc[1]), 1.0])
     proj = H @ pt
@@ -272,13 +282,17 @@ class FretDetectorInterface(ABC):
     """
 
     @abstractmethod
-    def detect(self, canon_bgr: np.ndarray, nut: Optional[dict] = None) -> dict:
+    def detect(self, canon_bgr: np.ndarray,
+               nut: Optional[dict] = None,
+               shear: Optional[dict] = None) -> dict:
         """Bundpozíciók detektálása a kanonikus képen.
 
         Args:
             canon_bgr: kanonikus perspektíva-warped BGR kép (600×80 px).
             nut:       nut detektálás eredménye (``step6b_find_nut`` kimenete),
                        vagy ``None`` ha nem elérhető.
+            shear:     step6d_shear_correction kimenete – az auto-mode dönti el
+                       Sobel-X vs Max-pooling választást.
 
         Returns:
             Dict kötelező kulcsokkal: fit, fret_xs_raw, fret_xs_filt,
@@ -293,7 +307,9 @@ class GeometricFretDetector(FretDetectorInterface):
     semmi logikát nem implementál újra.  Alapértelmezett detektor a pipeline-ban.
     """
 
-    def detect(self, canon_bgr: np.ndarray, nut: Optional[dict] = None) -> dict:
+    def detect(self, canon_bgr: np.ndarray,
+               nut: Optional[dict] = None,
+               shear: Optional[dict] = None) -> dict:
         fret_xs_raw = step7_fret_lines_canonical(canon_bgr)
         fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
 
@@ -331,26 +347,24 @@ class GeometricFretDetector(FretDetectorInterface):
 
 
 class IntensityFretDetector(FretDetectorInterface):
-    """Intenzitás-gradiens alapú bunddetektálás (Sobel-X csúcsdetektálás + step8).
+    """Intenzitás-alapú bunddetektálás konfigurálható profilstratégiával + step8.
 
-    A Hough-transzformáció helyett a kanonikus kép oszloponkénti Sobel-X
-    gradiens összegéből generál 1D profilt, majd ``scipy.signal.find_peaks``-kel
-    detektál csúcsokat.  A 17.817-es illesztést ugyanúgy a meglévő
-    ``step8_fit_fret_rule`` végzi – a matematikai logika nem kerül
-    újraimplementálásra ebben az osztályban.
+    mode="sobel"  – |Sobel-X|.sum(axis=0)  →  maximális precizitás egyenes bundoknál
+    mode="max"    – np.max(gray, axis=0)   →  robusztus dőlt/zajos képeknél
+    mode="auto"   – shear-eredmény alapján automatikusan választ:
+                    ha a shear-korrekció sikeres volt (corrected=True) VAGY
+                    az egyenes bund bizonyítható (n_lines≥4 és |α|<0.2°),
+                    akkor Sobel-X-et használ; egyébként Max-pooling-ot.
 
-    Előnyök a geometriai módszerrel szemben:
-    - Zajos / alacsony kontrasztú képeken jobban teljesíthet
-    - Nem függ a Hough küszöb paramétereinek helyes beállításától
-    - A gradiens-profil inspektálható (``result['profile']`` kulcs)
-
-    Hátrányok:
-    - Érzékenyebb ujj-okklúzióra (az ujjak is gradienst okoznak)
-    - A ``suppress_pairs`` opció segít, de nem eliminálja teljesen
+    A 17.817-es illesztést minden módban ``step8_fit_fret_rule`` végzi.
     """
+
+    # SNR-küszöb az auto fallback döntésnél: ha Sobel SNR < ennél, Max-pooling-ra vált
+    _SNR_FALLBACK_THR: float = 1.5
 
     def __init__(
         self,
+        mode: str = "auto",
         sobel_ksize: int = 3,
         smooth_sigma: float = 1.5,
         peak_height: float = 0.12,
@@ -359,50 +373,91 @@ class IntensityFretDetector(FretDetectorInterface):
         peak_max_width: float = 14.0,
         suppress_pairs: bool = True,
     ) -> None:
-        """
-        Args:
-            sobel_ksize:      OpenCV Sobel kernel mérete (1, 3 vagy 5).
-            smooth_sigma:     Gaussian simítás sigma értéke a gradiens-profilra.
-            peak_height:      Minimális csúcsmagasság (normalizált 0–1 skálán).
-            peak_distance:    Minimális csúcs–csúcs távolság (px).
-            peak_prominence:  Minimális csúcs prominencia.
-            peak_max_width:   Maximális csúcsszélesség (px); a szélesebb csúcsok
-                              valószínűleg ujjak, nem bundok.
-            suppress_pairs:   Ujjpár-szuppresszió alkalmazása (mint a geometriai
-                              úton, ``suppress_finger_pairs``).
-        """
-        self.sobel_ksize    = sobel_ksize
-        self.smooth_sigma   = smooth_sigma
-        self.peak_height    = peak_height
-        self.peak_distance  = peak_distance
+        self.mode            = mode
+        self.sobel_ksize     = sobel_ksize
+        self.smooth_sigma    = smooth_sigma
+        self.peak_height     = peak_height
+        self.peak_distance   = peak_distance
         self.peak_prominence = peak_prominence
-        self.peak_max_width = peak_max_width
-        self.suppress_pairs = suppress_pairs
+        self.peak_max_width  = peak_max_width
+        self.suppress_pairs  = suppress_pairs
 
-    def gradient_profile(self, canon_bgr: np.ndarray) -> np.ndarray:
-        """Normalizált oszloponkénti Sobel-X gradiens összeg.
+    # ── Belső segédmetódusok ──────────────────────────────────────────────────
 
-        Nyilvános metódus: vizualizálható a ``PipelineVisualizer``-ből.
-
-        Returns:
-            1D float array, hossza CANONICAL_W (600), értékek [0, 1].
-        """
+    def _norm_smooth(self, raw: np.ndarray) -> np.ndarray:
         from scipy.ndimage import gaussian_filter1d
-
-        gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        sobel = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=self.sobel_ksize)
-        profile = np.abs(sobel).sum(axis=0)
         if self.smooth_sigma > 0:
-            profile = gaussian_filter1d(profile, sigma=self.smooth_sigma)
-        max_val = float(profile.max())
-        if max_val > 1e-3:
-            profile = profile / max_val
-        return profile.astype(np.float32)
+            raw = gaussian_filter1d(raw, sigma=self.smooth_sigma)
+        mx = float(raw.max())
+        return (raw / mx).astype(np.float32) if mx > 1e-3 else raw.astype(np.float32)
 
-    def detect(self, canon_bgr: np.ndarray, nut: Optional[dict] = None) -> dict:
+    def _sobel_profile(self, gray: np.ndarray) -> np.ndarray:
+        sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=self.sobel_ksize)
+        return self._norm_smooth(np.abs(sx).sum(axis=0))
+
+    def _max_profile(self, gray: np.ndarray) -> np.ndarray:
+        """Oszloponkénti maximum – dőlésre-invariáns, robusztus."""
+        return self._norm_smooth(gray.max(axis=0).astype(np.float32))
+
+    def _snr(self, profile: np.ndarray, thr: float = 0.30) -> float:
+        above = profile[profile >= thr]
+        below = profile[profile <  thr]
+        if len(above) == 0 or len(below) == 0:
+            return 0.0
+        return float(above.mean() / (below.mean() + 1e-9))
+
+    def _select_mode(self, shear: Optional[dict]) -> str:
+        """Shear-eredmény alapján Sobel-X vagy Max-pooling választása.
+
+        Sobel-X (precizitás): shear korrigált VAGY bizonyítottan ≈0 (n≥4, |α|<0.2°)
+        Max-pooling (robusztus): ismeretlen/maradt dőlés (kevés vonal, stb.)
+        """
+        if shear is None:
+            return "sobel"
+        corrected = bool(shear.get("corrected", False))
+        angle     = abs(float(shear.get("shear_angle_deg", 0.0)))
+        n_lines   = int(shear.get("n_lines", 0))
+        if corrected or (n_lines >= 4 and angle < 0.2):
+            return "sobel"
+        return "max"
+
+    # ── Nyilvános API ─────────────────────────────────────────────────────────
+
+    def gradient_profile(self, canon_bgr: np.ndarray,
+                         shear: Optional[dict] = None) -> np.ndarray:
+        """Normalizált 1D profil a konfigurált módban.
+
+        Nyilvános metódus: vizualizálható a PipelineVisualizer-ből.
+        """
+        gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        active = self.mode if self.mode != "auto" else self._select_mode(shear)
+        if active == "max":
+            return self._max_profile(gray)
+        return self._sobel_profile(gray)
+
+    def detect(self, canon_bgr: np.ndarray,
+               nut: Optional[dict] = None,
+               shear: Optional[dict] = None) -> dict:
         from scipy.signal import find_peaks
 
-        profile = self.gradient_profile(canon_bgr)
+        gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        active_mode = self.mode if self.mode != "auto" else self._select_mode(shear)
+
+        if active_mode == "max":
+            profile = self._max_profile(gray)
+        else:
+            profile = self._sobel_profile(gray)
+
+        # SNR-alapú fallback: ha Sobel profil gyenge, Max-pooling-ra vált
+        if active_mode == "sobel" and self.mode == "auto":
+            snr_val = self._snr(profile)
+            if snr_val < self._SNR_FALLBACK_THR:
+                profile = self._max_profile(gray)
+                active_mode = "max"
+                print(f"  [IntensityFretDetector] Sobel SNR={snr_val:.2f} → Max-pooling fallback")
+
+        _shear_info = "n/a" if shear is None else f"{shear.get('shear_angle_deg', 0):.2f}°"
+        print(f"  [IntensityFretDetector] mode={active_mode} | shear={_shear_info}")
 
         peak_idxs, _ = find_peaks(
             profile,
@@ -442,14 +497,15 @@ class IntensityFretDetector(FretDetectorInterface):
             print(f"  [IntensityFretDetector] step8 hiba: {exc}")
             fit = _make_empty_fit()
 
-        fit["method"] = "intensity"
+        fit["method"] = f"intensity_{active_mode}"
         return {
             "fit":           fit,
             "fret_xs_raw":   fret_xs_raw,
             "fret_xs_filt":  fret_xs_filt,
             "removed_pairs": removed_pairs,
-            "method":        "intensity",
+            "method":        f"intensity_{active_mode}",
             "profile":       profile,
+            "profile_mode":  active_mode,
         }
 
 
@@ -660,15 +716,19 @@ def run_v14_pipeline(img_entry: dict,
     # ── 12–14. Bunddetektálás (cserélhető detektor) ─────────────────────────
     _detector = fret_detector if fret_detector is not None else _make_default_fret_detector()
     try:
-        det_result = _detector.detect(out["canon"], nut=out.get("nut"))
+        det_result = _detector.detect(
+            out["canon"], nut=out.get("nut"), shear=out.get("shear")
+        )
         out["fret_xs_raw"]          = det_result["fret_xs_raw"]
         out["fret_xs_filt"]         = det_result["fret_xs_filt"]
         out["removed_pairs"]        = det_result["removed_pairs"]
         out["fit"]                  = det_result["fit"]
         out["fret_detector_method"] = det_result.get("method", "unknown")
-        # IntensityFretDetector esetén a gradiens-profil is elérhető
+        # IntensityFretDetector esetén a gradiens-profil és aktív mód is elérhető
         if "profile" in det_result:
             out["intensity_profile"] = det_result["profile"]
+        if "profile_mode" in det_result:
+            out["intensity_profile_mode"] = det_result["profile_mode"]
     except Exception as exc:
         out["fit"] = None
         out["invalid_reason"] = f"fret_detection_failed: {exc}"
