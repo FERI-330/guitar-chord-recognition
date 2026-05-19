@@ -36,6 +36,9 @@ CFG: dict = {
     "step5_angle_tol": 15,
     "step5_outlier_ratio": 2.5,
     "step5_expansion_margin_frac": 0.30,
+    # STEP 6 – Trapézoid clamp (ROI stabilizálás)
+    "trapezoid_clamp_enabled": False,    # wrist-alapú ROI clamp: KI (Nut regresszió ellen)
+    "trapezoid_clamp_margin_px": 120,    # ha BE: test-oldali margó px (régi hardcoded: 30)
     # STEP 6b – Nut detektálás
     "nut_width_filter_enabled": True,   # FWHM-alapú nut vs. bund diszkrimináció
     "nut_min_width_px": 5.0,            # minimális FWHM px, ami nut-ra utal
@@ -43,6 +46,7 @@ CFG: dict = {
     # ── Kéz-határvezérelt Nut-keresési sáv ──────────────────────────────────
     "hand_boundary_enabled": True,      # landmark-alapú keresési sáv korlátozás
     "nut_hand_margin_px": 10,           # biztonsági margó a kézél előtt (canon px)
+    "hand_boundary_edge_guard_frac": 0.25,  # kézél < 25% képszéltől → ablak nem korlátoz
     # STEP 8 – Fret rule fitting
     "step8_tol_px": 10.0,
     "step8_ratio_tol": 0.08,

@@ -314,21 +314,24 @@ def step6_clamp_trapezoid_extent(edge_info: dict,
                                  margin_px: int = 30) -> dict:
     """Korlátozza a trapézoid along-kiterjedését a csukló pozíciójához.
 
-    A csukló a Nut közelében van; az alkar a csukló túloldalán nyúlik el.
-    Meghatározza, hogy a csukló az a_min vagy az a_max oldalhoz közelebb
-    van-e, majd azt az oldalt korlátozza: a trapézoid nem nyúlhat az alkar
-    felé margin_px-nél többel a csukló mögé.
+    Csak a test-oldali (a_max) határt vágja le; a Nut-oldalt (a_min) soha
+    nem érinti, mert a Nut a csukló és a fejléc között van.
+
+    CFG['trapezoid_clamp_enabled'] = False (alapértelmezés) → átmegy.
     """
+    if not bool(CFG.get("trapezoid_clamp_enabled", False)):
+        return edge_info
     if anchor is None or edge_info is None:
         return edge_info
     neck_dir = edge_info["neck_dir"]
     wrist_px = anchor.get("wrist_px")
     if wrist_px is None:
         return edge_info
+    margin = int(CFG.get("trapezoid_clamp_margin_px", 120))
     wrist_along = float(np.dot(np.array(wrist_px, dtype=np.float64), neck_dir))
     edge_info = dict(edge_info)
     edge_info["wrist_along"] = wrist_along
-    edge_info["clamp_margin_px"] = margin_px
+    edge_info["clamp_margin_px"] = margin
     return edge_info
 
 
@@ -354,18 +357,16 @@ def step6_trapezoid(img_bgr: np.ndarray, edge_info: dict) -> Optional[dict]:
     a_min = min(alongs)
     a_max = max(alongs)
 
-    # Clamp: a csukló pozíciója meghatározza a Nut-oldali határt.
-    # A csukló (nut-oldal) felé nem nyúlhat a trapézoid margin_px-nél tovább.
+    # Clamp: csak a test-oldali határt (a_max) korlátozzuk a csukló mögé.
+    # A Nut-oldalt (a_min) soha nem vágjuk: a Nut a csukló és a fejléc között van.
     wrist_along = edge_info.get("wrist_along")
     if wrist_along is not None:
-        margin = edge_info.get("clamp_margin_px", 30)
+        margin = edge_info.get("clamp_margin_px", 120)
         mid = (a_min + a_max) / 2.0
-        if wrist_along < mid:
-            # Csukló az a_min oldalon → a_min nem mehet wrist_along - margin alá
-            a_min = max(a_min, wrist_along - margin)
-        else:
-            # Csukló az a_max oldalon → a_max nem mehet wrist_along + margin fölé
+        if wrist_along >= mid:
+            # Csukló a test oldalon → a_max-ot korlátozzuk
             a_max = min(a_max, wrist_along + margin)
+        # wrist_along < mid (csukló a Nut oldalon): nem vágunk semmit
 
     span = a_max - a_min
     a_min -= span * 0.02
@@ -472,13 +473,23 @@ def step6b_find_nut(canon_bgr: np.ndarray,
     hand_bnd_enabled = bool(CFG.get("hand_boundary_enabled", True))
 
     def _clamp_sw(sw: int, is_left: bool) -> int:
-        """Korlátozza a keresési sáv végét a kézél előtt."""
+        """Korlátozza a keresési sáv végét a kézél előtt.
+
+        Ha a kézél a képszéltől < guard_frac (pl. 25%) távolságra van,
+        a korlátozás nem lép érvénybe: nyílt akkordeknél a kéz közel van
+        a Nut-hoz, és a szűkített ablak kizárná a Nut-jelöltet.
+        """
         if not (hand_bnd_enabled and hand_boundary_canon_x is not None):
             return sw
+        guard_frac = float(CFG.get("hand_boundary_edge_guard_frac", 0.25))
         if is_left:
+            if hand_boundary_canon_x < guard_frac * w:
+                return sw  # kézél túl közel a bal (Nut) szélhez → nem korlátoz
             limit = int(hand_boundary_canon_x) - margin
             return min(sw, max(min_offset + 1, limit))
         else:
+            if hand_boundary_canon_x > w * (1.0 - guard_frac):
+                return sw  # kézél túl közel a jobb (Nut) szélhez → nem korlátoz
             limit = w - int(hand_boundary_canon_x) - margin
             return min(sw, max(min_offset + 1, limit))
 
