@@ -1235,3 +1235,54 @@ A 4. cella futtatásakor a gitárnyak + bund overlay + MediaPipe ujjak **azonnal
 - fix: `src/viz.py` `draw_pipeline_grid` standalone függvényben `self._set_equal_aspect(ax)` → `vis._set_equal_aspect(ax)` NameError javítva (a `self` nem létezik osztályon kívüli függvényben)
 
 committed recent visualization and notebook display improvements
+
+---
+
+## 🗓️ 2026-05-19 – fix: restored stable ROI from earlier versions and integrated with new high-precision intensity detector
+
+### Probléma (kétlépéses regresszió)
+
+**1. regresszió (`aa8bfaf`):** A `step6_clamp_trapezoid_extent` függvény a trapézoid Nut-oldali határát (a_min) a csukló pozíciójánál vágta le `margin_px=30` értékkel. Ez helytelen, mert nyílt akkordoknál (pl. G, C, D) a csukló akár 100–200 pixelnyire lehet a Nut-tól (eredeti képtérben), így a ROI a Nut helyett a kézfejnél kezdődött.
+
+**2. regresszió (`42bf90c`):** A `hand_boundary_canon_x` alapú keresési ablak (`_clamp_sw`) túl szűk limitet adott nyílt akkordoknál: `limit = hand_bnd_x - 10px`, ahol a legközelebbi MCP-ízület x=80px körül volt, így a Nut-keresés csak `[5:70]` pixelre korlátozódott.
+
+### Elvégzett javítások (`b5ef79d`)
+
+**`src/config.py`**
+- `trapezoid_clamp_enabled: False` — a wrist-alapú clamp alapból kikapcsolva
+- `trapezoid_clamp_margin_px: 120` — ha valaha bekapcsol: biztonságos test-oldali margó (régi 30px helyett)
+- `hand_boundary_edge_guard_frac: 0.25` — új őr: ha a kézél a kanonikus kép szélétől <25%-ra van (open chord), a Nut-keresési ablak nem szűkül
+
+**`src/geometry.py` — `step6_clamp_trapezoid_extent`**
+- CFG `trapezoid_clamp_enabled` flag ellenőrzés: ha False, azonnal visszatér (no-op)
+- Hardcoded `margin_px=30` helyett `CFG['trapezoid_clamp_margin_px']` (120px)
+
+**`src/geometry.py` — `step6_trapezoid` clamp logika**
+- Megfordított feltétel: `wrist_along < mid` (csukló Nut oldalon) → **semmi nem változik**
+- Csak `wrist_along >= mid` (test oldal) esetén vágja le `a_max`-ot
+
+**`src/geometry.py` — `step6b_find_nut._clamp_sw`**
+- 25%-os biztonsági küszöb: ha `hand_boundary_canon_x < 0.25 * w` → ablak nem korlátozott
+- Megakadályozza, hogy nyílt akkord pozíciókban a Nut kiessen a keresési ablakból
+
+**Megjegyzés:** A kéz-maszk Canny/Hough előtti kivonása (`build_finger_mask` → `edges_masked`) már az `aa8bfaf` előtti állapotban is megvolt a `fretboard.py`-ban — nem kellett hozzányúlni.
+
+### Notebook szinkronizáció
+
+- `%load_ext autoreload` + `%autoreload 2` hozzáadva mind a 4 pipeline-notebookhoz (`03_pipeline`, `05_visual_demo`, `06_comparison_dashboard`, `06_evaluation`) — ezentúl a kernel nem cache-eli a régi `src/` modulokat
+
+### Verifikációs teszt eredménye (4 teszt kép, `IntensityFretDetector`)
+
+| Kép | Osztály | OK | Nut-x | Side | Coverage |
+|-----|---------|----|----|------|----------|
+| 1762212326326.jpg | A | ✓ | 91px | left | 0.78 |
+| IMG_20251102_024133.jpg | B | ✓ | 176px | left | 0.60 |
+| IMG_20251102_024033.jpg | C | ✓ | 107px | left | 0.50 |
+| 1762212432976.jpg | D | ✗ | — | — | 0.00 |
+
+3/4 OK, mind a 3 sikeres képnél `[nut_detect_v12]` üzenet, trapézoid clamp inaktív.
+
+### Architektúra-invariancia
+
+- `GeometricFretDetector` ↔ `IntensityFretDetector` csere továbbra is működik
+- Minden új paraméter `CFG`-n keresztül kapcsolható — monolitikus hack nélkül
