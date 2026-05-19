@@ -732,6 +732,112 @@ def step6_extend_for_nut(corners_px: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STEP 6d – Post-warp shear korrekció
+# ─────────────────────────────────────────────────────────────────────────────
+
+def step6d_shear_correction(canon_bgr: np.ndarray,
+                             min_lines: int = 4,
+                             angle_tol_from_vert: float = 30.0,
+                             min_tilt_deg: float = 2.0,
+                             min_len_frac: float = 0.20) -> dict:
+    """Post-warp shear korrekció a bund-dőlés kiegyenesítéséhez.
+
+    A kanonikus képen (600×80 px) HoughLinesP-vel megkeresi a közel-függőleges
+    vonalakat, megméri a hosszal súlyozott átlagos dőlésszöget (α), és ha
+    |α| > min_tilt_deg, shear mátrixot számol.
+
+    Shear konvenció: pozitív α = bund jobbra dől ahogy y nő.
+    Korrekció: x_corr = x − tan(α)·y  (nut-oldal x=0 rögzített marad).
+
+    Visszaad: dict {
+        'shear_angle_deg' : float,        # mért dőlésszög
+        'S'               : np.ndarray,   # 3×3 homogén shear mátrix
+        'S_inv'           : np.ndarray,   # S inverze
+        'corrected'       : bool,
+        'canon_corrected' : np.ndarray,   # shear-korrigált kanonikus kép
+        'n_lines'         : int,
+    }
+    """
+    H_c = CFG["canonical_h"]
+    W   = CFG["canonical_w"]
+
+    gray    = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges   = cv2.Canny(blurred, 15, 60)
+    min_len = max(int(H_c * min_len_frac), 6)
+    lines   = cv2.HoughLinesP(
+        edges, rho=1, theta=np.pi / 180, threshold=12,
+        minLineLength=min_len, maxLineGap=5,
+    )
+
+    _no = {
+        "shear_angle_deg": 0.0,
+        "S":     np.eye(3, dtype=np.float64),
+        "S_inv": np.eye(3, dtype=np.float64),
+        "corrected": False,
+        "canon_corrected": canon_bgr,
+        "n_lines": 0,
+    }
+
+    tilts, weights = [], []
+    if lines is not None:
+        for ln in lines:
+            x1, y1, x2, y2 = map(int, ln[0])
+            dx, dy = float(x2 - x1), float(y2 - y1)
+            if abs(dy) < 1e-3:
+                continue
+            angle_from_vert = abs(np.degrees(np.arctan2(abs(dx), abs(dy))))
+            if angle_from_vert > angle_tol_from_vert:
+                continue
+            # Normalizálás: dy legyen mindig pozitív (felülről lefelé),
+            # hogy arctan2(dx, dy) ∈ (−90°, +90°) tartományban maradjon.
+            if dy < 0:
+                dx, dy = -dx, -dy
+            # Signed tilt: pozitív = jobbra dől (dx>0) ahogy y nő (dy>0)
+            tilt   = float(np.degrees(np.arctan2(dx, dy)))
+            length = float(np.hypot(dx, dy))
+            tilts.append(tilt)
+            weights.append(length)
+
+    _no["n_lines"] = len(tilts)
+    if len(tilts) < min_lines:
+        print(f"  [shear_corr] kevés vonal ({len(tilts)}<{min_lines}) → kihagyva")
+        return _no
+
+    alpha_deg = float(np.average(tilts, weights=weights))
+    print(f"  [shear_corr] n={len(tilts)} | α={alpha_deg:.2f}°", end=" | ")
+
+    if abs(alpha_deg) < min_tilt_deg:
+        print("nincs korrekció")
+        return {**_no, "shear_angle_deg": alpha_deg}
+
+    s = float(np.tan(np.radians(alpha_deg)))
+    # Kanonikus térben: dst(x,y) ← src(x + s·y, y)  →  x_corr = x − s·y rögzíti a bundot
+    S     = np.array([[1., -s,  0.],
+                      [0.,  1., 0.],
+                      [0.,  0., 1.]], dtype=np.float64)
+    S_inv = np.array([[1.,  s,  0.],
+                      [0.,  1., 0.],
+                      [0.,  0., 1.]], dtype=np.float64)
+
+    M_affine = np.float32([[1., -s, 0.],
+                            [0.,  1., 0.]])
+    canon_corr = cv2.warpAffine(
+        canon_bgr, M_affine, (W, H_c),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
+    )
+    print(f"s={s:.4f} → korrigált")
+    return {
+        "shear_angle_deg": alpha_deg,
+        "S":     S,
+        "S_inv": S_inv,
+        "corrected": True,
+        "canon_corrected": canon_corr,
+        "n_lines": len(tilts),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STEP 7 – Bundvonalak a kanonikus képen
 # ─────────────────────────────────────────────────────────────────────────────
 

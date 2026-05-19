@@ -26,6 +26,7 @@ from src.geometry import (
     step4_split_lines,
     step5_outer_edges, step6_clamp_trapezoid_extent, step6_trapezoid, step6_warp,
     step6b_find_nut, step6c_trim_to_nut, step6_extend_for_nut,
+    step6d_shear_correction,
     step7_fret_lines_canonical, step8_fit_fret_rule,
 )
 from src.hand_landmark import (
@@ -147,12 +148,44 @@ def suppress_finger_pairs(fret_xs: list,
 
 def _choose_nut_side(anchor: Optional[dict],
                      H: Optional[np.ndarray],
-                     img_shape: tuple) -> Optional[str]:
-    """A kéz-anchor segítségével becsli, melyik oldalon van a nut."""
+                     img_shape: tuple,
+                     landmarks: Optional[list] = None) -> Optional[str]:
+    """A nut oldalának meghatározása a kanonikus képen.
+
+    Elsődleges módszer (robusztus magas fogásállásban is): az ujjhegyek
+    kanonikus x átlagát a csukló kanonikus x-éhez hasonlítja. Az ujjhegyek
+    a nut felé mutatnak → ha mean(tip_cx) < wrist_cx, a nut bal oldalt van.
+
+    Fallback: tenyér-centrum 50%-os küszöb (csak ha landmarks nem elérhető).
+    """
     if anchor is None or H is None:
         return None
+
+    h_img, w_img = img_shape[:2]
+
+    # ── Elsődleges: ujjhegy-irány ────────────────────────────────────────────
+    if landmarks is not None and len(landmarks) >= 21:
+        wrist_lm = landmarks[0]
+        wrist_pt = np.array([wrist_lm[0] * w_img, wrist_lm[1] * h_img, 1.0])
+        wrist_proj = H @ wrist_pt
+        if abs(wrist_proj[2]) > 1e-9:
+            wrist_cx = float(wrist_proj[0] / wrist_proj[2])
+            tip_cxs = []
+            for tip_idx in (4, 8, 12, 16, 20):
+                xn, yn, _ = landmarks[tip_idx]
+                pt = np.array([xn * w_img, yn * h_img, 1.0])
+                proj = H @ pt
+                if abs(proj[2]) > 1e-9:
+                    tip_cxs.append(float(proj[0] / proj[2]))
+            if tip_cxs:
+                mean_tip_cx = float(np.mean(tip_cxs))
+                side = "left" if mean_tip_cx < wrist_cx else "right"
+                print(f"  [nut_side] tip_mean={mean_tip_cx:.0f} vs wrist={wrist_cx:.0f} → {side}")
+                return side
+
+    # ── Fallback: tenyér-centrum 50%-os küszöb ───────────────────────────────
     pc = anchor["palm_center_px"]
-    pt = np.array([pc[0], pc[1], 1.0])
+    pt = np.array([float(pc[0]), float(pc[1]), 1.0])
     proj = H @ pt
     if abs(proj[2]) < 1e-9:
         return None
@@ -568,7 +601,7 @@ def run_v14_pipeline(img_entry: dict,
     out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
 
     # ── 10. Nut detektálás (side_hint + hand_boundary alapú keresés) ─────────
-    side_hint = _choose_nut_side(anchor, H, img.shape)
+    side_hint = _choose_nut_side(anchor, H, img.shape, landmarks=landmarks)
     out["nut_side_hint"] = side_hint
 
     # Kézél vetítése a kanonikus térbe → Nut-keresési sáv korlátozása
@@ -603,6 +636,25 @@ def run_v14_pipeline(img_entry: dict,
         H2, H2_inv, canon2 = step6_warp(img, corners_trim)
         out["corners_trim"] = corners_trim
         out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
+
+    # ── 11b. Post-warp shear korrekció (step6d) ────────────────────────────
+    shear = step6d_shear_correction(out["canon"])
+    out["shear"] = shear
+    if shear["corrected"]:
+        out["H"]     = shear["S"] @ out["H"]
+        out["H_inv"] = out["H_inv"] @ shear["S_inv"]
+        out["canon"] = shear["canon_corrected"]
+        # Nut újra-detektálása a shear-korrigált kanonikus képen.
+        # A shear-korrekció a nut x-pozícióját eltolhatja (x_dst = -s·y),
+        # ezért a pre-shear nut_x nem használható a step8 anchor-ként.
+        nut_post = step6b_find_nut(
+            out["canon"],
+            side_hint=out.get("nut_side_hint"),
+            hand_boundary_canon_x=out.get("hand_boundary_canon_x"),
+        )
+        if nut_post is not None:
+            out["nut"] = nut_post
+            nut = nut_post
 
     # ── 12–14. Bunddetektálás (cserélhető detektor) ─────────────────────────
     _detector = fret_detector if fret_detector is not None else _make_default_fret_detector()
