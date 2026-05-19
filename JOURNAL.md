@@ -120,6 +120,45 @@
 
 *Ez a dokumentum folyamatosan bővül. Semmi nem törlődik – minden döntés és fázis visszakereshető.*
 
+## 🗓️ 2026-05-19 – Default fret detector átváltás
+
+- change: switched default fret detection engine to INTENSITY_DATA based on recent A/B test results
+- A teljes pipeline mostantól a `CFG['fret_engine']` alapján példányosít, az `INTENSITY_DATA` az új default
+- A `GEOMETRIC_RULE` kód megmaradt fallback opciónak, nem lett eltávolítva
+- ROI hibák továbbra is fennállnak, de ezek függetlenek a bunddetektor választásától
+
+## 🗓️ 2026-05-19 – viz: normalized dashboard figure size while preserving high-DPI sharpness and aspect ratio
+
+- viz: bevezetve a `MAX_FIG_WIDTH` korlát a `src/viz.py`-ban, így a notebook dashboardok nem nyúlnak túl szélesre
+- viz: a számított `figsize` most arányosan skálázódik vissza, ha eléri a felső szélességhatárt, miközben az aspect ratio megmarad
+- viz: a notebook-megjelenítéshez `constrained_layout` került használatba, a mentésnél pedig maradt a magas DPI
+- viz: a matplotlib-vonalak és címek skálája is visszafogottabb lett a kisebb vásznon
+
+## 🗓️ 2026-05-19 – optimization: balanced DPI and figsize to prevent excessive pixel dimensions and file sizes
+
+- optimization: a notebook inline DPI 100 körül van, a mentés pedig 180 DPI-re lett limitálva
+- optimization: a dashboard és a részletes vizualizációk most JPG-ben mentődnek, 85-ös minőség és optimize tömörítéssel
+- optimization: a szélesség 12 inch-re, a magasság 6-8 inch környékére van korlátozva, így a bitmap nem szalad el
+- optimization: a downsampling során bilinear interpolációt használunk, hogy a vékony vonalak továbbra is olvashatók maradjanak
+
+## 🗓️ 2026-05-19 – Stílus: globális vizualizációs beállítások
+
+- style: implemented global visualization settings for line thickness to ensure consistency across all dashboards
+- style: increased line thickness significantly to ensure visibility on high-resolution displays
+- graphics: upgraded visualization engine to high-DPI rendering with adaptive figure sizing and nearest-neighbor interpolation
+- viz: minimized whitespace and optimized canvas aspect ratio for better space utilization
+- Bevezetve és most már `VIS_LINE_THICKNESS = 5` értékre emelve a központi konstans a `src/config.py`-ban
+- A `PipelineVisualizer` alapértelmezett vonalvastagsága most ebből a központi konfigurációból jön
+- A notebookokból eltávolítva a helyi `line_thickness` override-ok
+- Érintett fájlok: `src/config.py`, `src/viz.py`, `notebooks/05_visual_demo.ipynb`, `notebooks/06_comparison_dashboard.ipynb`
+
+## 🗓️ 2026-05-19 – fix: corrected vertical image compression by enforcing equal aspect ratio and dynamic figsize calculation
+
+- fix: a vizuális metódusokban minden kritikus kép-Axes most `equal` aspect-et kap `adjustable='box'` beállítással
+- fix: a `dashboard.jpg`, `canonical_detail.jpg` és a stílus-variáns rács figürái a forráskép képarányából számolt `figsize`-t használnak
+- fix: a notebook grid-eknél megszűnt az `aspect='auto'` kényszer, így a kör alakú formák nem nyúlnak ellipszissé
+- ellenőrzés: a mentett képek újragenerálása és a `dashboard.jpg` vizuális ellenőrzése következik
+
 ---
 
 ## 🗓️ 2026-05-15 – Naplófrissítés: README és rövid összefoglaló
@@ -1098,3 +1137,53 @@ a `predicted_x` és `coverage_ratio` kulcsok garantáltan jelen lesznek, azonos 
 
 ### Státusz
 ✅ `FretDetectorInterface` + `IntensityFretDetector` implementálva és tesztelve (9/9 PASS)
+
+---
+
+## 🗓️ 2026-05-19 – optimization: reduced figure dimensions and DPI to prevent excessive memory usage and ensure fast notebook rendering
+
+### Elvégzett változtatások (`src/viz.py`)
+
+- **DPI csökkentés:** `figure.dpi` 100 → **96**, `savefig.dpi` 180 → **120** (globális beállítás)
+- **Magasság korlát:** új `MAX_FIG_HEIGHT = 6.0` konstans bevezetve; a `_resolve_figsize_with_scale` mostantól arányos visszaskálázást végez mind szélességre (≤12 inch), mind magasságra (≤6 inch)
+- **Lokális DPI override-ok eltávolítva:** `plot_training_history`, `plot_multi_training_histories`, `plot_scatter_2d` — ezek `plt.rcParams["figure.dpi"] = max(150, ...)` sorai törölve
+- **Interpoláció javítva:** `draw_3panel_comparison` `interpolation="nearest"` → `"bilinear"`
+- **JPG-kompatibilis mentés:** `_save_figure()` modul-szintű segédfüggvény bevezetve; `.jpg`/`.jpeg` kiterjesztésű útvonalaknál automatikusan `quality=85, optimize=True` Pillow-paraméterekkel ment
+- **`figsize` alapértékek korrigálva:** `plot_multi_training_histories` default `(14, 5)` → `(12, 5)`
+- **Összes `savefig` hívás** átírva `_save_figure(fig, save_path)`-ra (egységes 120 DPI)
+
+### Új átlagos pixel-felbontás dashboardonként
+
+| Elrendezés | Régi (180 DPI) | Új (120 DPI) |
+|---|---|---|
+| 3-panel (1 sor) | ~3456 × 864 px | **1440 × 360 px** |
+| 2-panel (1 sor) | ~2765 × 864 px | **1440 × 450 px** |
+| 6-panel (2 sor) | ~3456 × 1728 px | **1440 × 720 px** |
+| Átlag | ~3200 × 1150 px | **~1440 × 510 px** |
+
+Pixel-terület csökkenés: ~**5–7×** kisebb bitmap, fájlméret csökkenés JPG esetén további ~**3–4×**.
+
+---
+
+## 🗓️ 2026-05-19 – viz: enabled automatic inline dashboard display in notebooks for immediate visual feedback
+
+### Probléma
+
+A `05_visual_demo.ipynb` celláinak végén `plt.close(fig)` hívás szerepelt, ami elnémította a Jupyter inline megjelenítést — a kép csak a lemezre mentődött, a cella alatt nem jelent meg.
+
+### Elvégzett változtatások
+
+**`notebooks/05_visual_demo.ipynb`**
+- `cell-01` (Setup): `%matplotlib inline` mágikus parancs hozzáadva a cella legelejére; rcParams korrigálva: `figure.dpi=96`, `savefig.dpi=120` (illeszkedik az `src/viz.py` globális beállításaihoz)
+- `cell-41` (Dashboard): `plt.close(fig)` → `plt.show()`; `dpi=150` → `dpi=120`; `fig_h` felső korlát 8.0 → 6.0
+- `cell-51` (Kanonikus nézet): `plt.close(fig2)` → `plt.show()`; `dpi=150` → `dpi=120`; `fig2_h` korlát 8.0 → 6.0
+- `cell-61` (Stílus variánsok): `plt.close(fig3)` → `plt.show()`; `dpi=150` → `dpi=120`; `fig3_h` korlát 8.0 → 6.0
+
+**`src/viz.py`** – összes publikus figure-visszaadó függvény és metódus:
+- `show: bool = True` paraméter hozzáadva mind a 7 publikus függvényhez / metódushoz
+- `if show: plt.show()` hívás bekerült a `return fig` elé
+- Érintett funkciók: `draw_detector_comparison`, `draw_3panel_comparison`, `draw_pipeline_result`, `draw_pipeline_grid`, `plot_training_history`, `plot_multi_training_histories`, `plot_scatter_2d`
+
+### Eredmény
+
+A 4. cella futtatásakor a gitárnyak + bund overlay + MediaPipe ujjak **azonnal megjelenik** a cella alatt. A fájlmentés (`dashboard.jpg`) és az inline megjelenítés egyszerre történik: először `savefig`, majd `plt.show()`. A `show=False` opció szkriptekből való híváshoz megmarad.
