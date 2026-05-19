@@ -638,6 +638,7 @@ def run_v14_pipeline(img_entry: dict,
         out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
 
     # ── 11b. Post-warp shear korrekció (step6d) ────────────────────────────
+    out["canon_pre_shear"] = out["canon"]   # fallback-összehasonlításhoz
     shear = step6d_shear_correction(out["canon"])
     out["shear"] = shear
     if shear["corrected"]:
