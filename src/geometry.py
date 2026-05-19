@@ -122,6 +122,50 @@ def step3_neck_angle(lines: list) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STEP 3b – Nyakirány finomítás bund-vonalak alapján
+# ─────────────────────────────────────────────────────────────────────────────
+
+def step3b_refine_neck_angle(neck_angle_deg: float,
+                              fret_lines: list,
+                              max_gap_deg: float = 40.0) -> float:
+    """Finomítja a nyakirányt a bund-vonalak merőleges iránya alapján.
+
+    A bund-vonalak (fret_lines) kb. 90°-ban merőlegesek a nyakra, ezért
+    szögükből visszaszámítható egy alternatív nyakirány-becslés.  Súlyozott
+    mediánnal robusztus az outlier bund-vonalakkal szemben.
+
+    Ha a két becslés eltér > max_gap_deg-nél, a refinement kihagyja (outlier).
+    Visszaad: finomított szögfok (float).
+    """
+    if len(fret_lines) < 3:
+        return neck_angle_deg
+
+    fret_angles = np.array([_line_stats(l)[0] for l in fret_lines])
+    fret_lengths = np.array([_line_stats(l)[1] for l in fret_lines])
+
+    neck_from_frets = np.array([_normalize_angle(a + 90.0) for a in fret_angles])
+
+    sorted_idx = np.argsort(neck_from_frets)
+    sorted_angles = neck_from_frets[sorted_idx]
+    sorted_weights = fret_lengths[sorted_idx]
+    cum_w = np.cumsum(sorted_weights)
+    median_idx = int(np.searchsorted(cum_w, cum_w[-1] * 0.5))
+    fret_based = float(sorted_angles[min(median_idx, len(sorted_angles) - 1)])
+
+    gap = abs(fret_based - neck_angle_deg)
+    if gap > max_gap_deg:
+        print(f"  [neck_refine] gap={gap:.1f}° > {max_gap_deg}° → kihagyva")
+        return neck_angle_deg
+
+    w_fret = min(len(fret_lines) / 3.0, 4.0)
+    blended = (neck_angle_deg + fret_based * w_fret) / (1.0 + w_fret)
+    print(f"  [neck_refine] long→{neck_angle_deg:.2f}° | "
+          f"fret→{fret_based:.2f}° (n={len(fret_lines)}) | "
+          f"blend→{blended:.2f}°")
+    return float(blended)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STEP 4 – Hosszanti vs. bund-irányú vonalak szétválasztása
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -412,8 +456,8 @@ def step6_trapezoid(img_bgr: np.ndarray,
         # wrist_along < mid (csukló a Nut oldalon): nem vágunk semmit
 
     span = a_max - a_min
-    a_min -= span * 0.02
-    a_max += span * 0.02
+    a_min -= span * 0.05
+    a_max += span * 0.05
 
     l_start = _pt_on_line(left["midpoint"], neck_dir, a_min)
     l_end = _pt_on_line(left["midpoint"], neck_dir, a_max)
@@ -649,6 +693,41 @@ def step6c_trim_to_nut(corners_px: np.ndarray,
     else:
         new_corners[1] = img_pts[0]
         new_corners[2] = img_pts[1]
+    return new_corners
+
+
+def step6_extend_for_nut(corners_px: np.ndarray,
+                          H_inv: np.ndarray,
+                          side: str,
+                          extend_px: int = 80) -> Optional[np.ndarray]:
+    """ROI kiterjesztés a nut irányába, ha a nut nem volt detektálható.
+
+    Static fallback: a kanonikus tér `side` oldalát `extend_px` pixellel
+    terjeszti ki, majd H_inv-vel visszavetíti az eredeti képtérbe.
+    A jobb/bal oldalt a step6c-vel analóg módon módosítja.
+
+    Visszaad: módosított corners_px (np.ndarray), vagy None ha side érvénytelen.
+    """
+    H_c = CFG["canonical_h"]
+    W = CFG["canonical_w"]
+    new_corners = corners_px.copy().astype(np.float32)
+
+    if side == "left":
+        canon_pts = np.array([[-extend_px, 0],
+                               [-extend_px, H_c - 1]], dtype=np.float32).reshape(-1, 1, 2)
+        img_pts = cv2.perspectiveTransform(canon_pts, H_inv).reshape(-1, 2)
+        new_corners[0] = img_pts[0]  # tl
+        new_corners[3] = img_pts[1]  # bl
+    elif side == "right":
+        canon_pts = np.array([[W + extend_px, 0],
+                               [W + extend_px, H_c - 1]], dtype=np.float32).reshape(-1, 1, 2)
+        img_pts = cv2.perspectiveTransform(canon_pts, H_inv).reshape(-1, 2)
+        new_corners[1] = img_pts[0]  # tr
+        new_corners[2] = img_pts[1]  # br
+    else:
+        return None
+
+    print(f"  [extend_for_nut] {side} side +{extend_px}px → re-warp")
     return new_corners
 
 

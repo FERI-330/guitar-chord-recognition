@@ -50,7 +50,8 @@ CFG: dict = {
     "hand_boundary_edge_guard_frac": 0.25,  # kézél < 25% képszéltől → ablak nem korlátoz
     # ── Nut-First: trapézoid kiterjesztése a kéz felé ────────────────────────
     "nut_extend_amin_enabled": True,    # a_min kiterjesztése landmark-alapon (Nut-First)
-    "nut_extend_amin_margin_px": 40,    # extra margó a legközelebbi landmark mögé (px)
+    "nut_fallback_extend_px": 80,       # statikus kiterjesztés ha nut nem detektálható
+    "nut_extend_amin_margin_px": 120,   # extra margó a legközelebbi landmark mögé (px)
     # STEP 8 – Fret rule fitting
     "step8_tol_px": 10.0,
     "step8_ratio_tol": 0.08,
