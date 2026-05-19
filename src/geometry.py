@@ -309,6 +309,29 @@ def _pt_on_line(midpoint: np.ndarray, neck_dir: np.ndarray,
     return midpoint + (target_along - base) * neck_dir
 
 
+def step6_clamp_trapezoid_extent(edge_info: dict,
+                                 anchor: Optional[dict],
+                                 margin_px: int = 30) -> dict:
+    """Korlátozza a trapézoid along-kiterjedését a csukló pozíciójához.
+
+    A csukló a Nut közelében van; az alkar a csukló túloldalán nyúlik el.
+    Meghatározza, hogy a csukló az a_min vagy az a_max oldalhoz közelebb
+    van-e, majd azt az oldalt korlátozza: a trapézoid nem nyúlhat az alkar
+    felé margin_px-nél többel a csukló mögé.
+    """
+    if anchor is None or edge_info is None:
+        return edge_info
+    neck_dir = edge_info["neck_dir"]
+    wrist_px = anchor.get("wrist_px")
+    if wrist_px is None:
+        return edge_info
+    wrist_along = float(np.dot(np.array(wrist_px, dtype=np.float64), neck_dir))
+    edge_info = dict(edge_info)
+    edge_info["wrist_along"] = wrist_along
+    edge_info["clamp_margin_px"] = margin_px
+    return edge_info
+
+
 def step6_trapezoid(img_bgr: np.ndarray, edge_info: dict) -> Optional[dict]:
     """A két kiválasztott él alapján felépíti a fretboard trapézot (v9)."""
     if edge_info is None:
@@ -330,6 +353,19 @@ def step6_trapezoid(img_bgr: np.ndarray, edge_info: dict) -> Optional[dict]:
     alongs = [float(np.dot(p, neck_dir)) for p in all_endpts]
     a_min = min(alongs)
     a_max = max(alongs)
+
+    # Clamp: a csukló pozíciója meghatározza a Nut-oldali határt.
+    # A csukló (nut-oldal) felé nem nyúlhat a trapézoid margin_px-nél tovább.
+    wrist_along = edge_info.get("wrist_along")
+    if wrist_along is not None:
+        margin = edge_info.get("clamp_margin_px", 30)
+        mid = (a_min + a_max) / 2.0
+        if wrist_along < mid:
+            # Csukló az a_min oldalon → a_min nem mehet wrist_along - margin alá
+            a_min = max(a_min, wrist_along - margin)
+        else:
+            # Csukló az a_max oldalon → a_max nem mehet wrist_along + margin fölé
+            a_max = min(a_max, wrist_along + margin)
 
     span = a_max - a_min
     a_min -= span * 0.02
@@ -383,13 +419,47 @@ def step6_warp(img_bgr: np.ndarray,
 def step6b_find_nut(canon_bgr: np.ndarray,
                     search_frac: float = 0.30,
                     threshold_factor: float = 2.5,
-                    min_offset: int = 5) -> Optional[dict]:
-    """Megkeresi a nutot (0. bund) a kanonikus képen Sobel-x alapján."""
+                    min_offset: int = 5,
+                    side_hint: Optional[str] = None) -> Optional[dict]:
+    """Megkeresi a nutot (0. bund) a kanonikus képen Sobel-x alapján.
+
+    Ha side_hint ('left'/'right') adott, csak azt az oldalt vizsgálja
+    kiterjesztett (40%) keresési sávval és alacsonyabb (2.0×) küszöbbel.
+    """
     gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY)
     sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     col_response = np.abs(sx).sum(axis=0).astype(np.float32)
 
     w = canon_bgr.shape[1]
+    median_response = float(np.median(col_response))
+
+    if side_hint is not None:
+        # Egyoldalas keresés: kiterjesztett régió, lazább küszöb
+        sw = max(int(w * 0.40), 10)
+        thr = 2.0 * (median_response + 1e-6)
+        if side_hint == "left":
+            region = col_response[min_offset:sw]
+            if len(region) == 0:
+                return None
+            peak = float(region.max())
+            nut_x = int(np.argmax(region)) + min_offset
+        else:
+            region = col_response[w - sw:w - min_offset]
+            if len(region) == 0:
+                return None
+            peak = float(region.max())
+            nut_x = (w - sw) + int(np.argmax(region))
+        ratio = peak / (median_response + 1e-6)
+        print(f"  [nut_detect_v11] side_hint={side_hint} | "
+              f"median={median_response:.0f} | peak={peak:.0f} | ratio={ratio:.2f}")
+        if peak < thr:
+            print(f"  [nut_detect_v11] nincs egyértelmű nut (ratio={ratio:.2f} < 2.0)")
+            return None
+        print(f"  [nut_detect_v11] nut találat: {side_hint} oldal @ x={nut_x}px")
+        return {"side": side_hint, "nut_x": nut_x, "peak": peak, "ratio": ratio,
+                "col_response": col_response}
+
+    # Kétoldalas fallback (side_hint=None esetén)
     sw = max(int(w * search_frac), 10)
     left_region = col_response[min_offset:sw]
     right_region = col_response[w - sw:w - min_offset]
@@ -399,7 +469,6 @@ def step6b_find_nut(canon_bgr: np.ndarray,
 
     left_peak_val = float(left_region.max())
     right_peak_val = float(right_region.max())
-    median_response = float(np.median(col_response))
     threshold = threshold_factor * (median_response + 1e-6)
 
     if left_peak_val >= right_peak_val:

@@ -30,6 +30,8 @@ CFG: dict = {
     "hough_threshold": 30,
     "hough_min_len_frac": 0.15,
     "hough_max_gap": 15,
+    # Finger mask – forearm extension
+    "forearm_extend_scale": 1.5,
     # STEP 5 – Outer edges
     "step5_angle_tol": 15,
     "step5_outlier_ratio": 2.5,
