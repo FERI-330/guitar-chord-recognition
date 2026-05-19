@@ -32,6 +32,93 @@ _MIN_RUN_SPACINGS = 2                   # min 2 szomszédos arány = 3 pont
 # Segédfüggvények
 # ─────────────────────────────────────────────────────────────────────────────
 
+def detect_guitar_orientation(mp_results) -> Optional[dict]:
+    """Kéz-anatómiából (WRIST vs INDEX_FINGER_MCP) becsli a nut oldali hintet.
+
+    Bemenet lehet:
+      - landmarks lista (21 x/y/z tuple),
+      - dict: {"landmarks", "img_shape", "handedness"},
+      - MediaPipe result objektum (hand_landmarks + handedness).
+
+    A ``side_hint`` alapja a kép-koordináta (index_mcp.x - wrist.x).
+    Ha handedness alapján ez tükörhelyzetet jelez, dinamikusan felülírjuk,
+    így a nut-keresés orientációs hintje stabil marad selfie/mirrored forrásnál is.
+    """
+    if mp_results is None:
+        return None
+
+    landmarks = None
+    img_shape = None
+    handedness = None
+
+    if isinstance(mp_results, dict):
+        landmarks = mp_results.get("landmarks")
+        img_shape = mp_results.get("img_shape")
+        handedness = mp_results.get("handedness")
+    elif isinstance(mp_results, list):
+        landmarks = mp_results
+    else:
+        if hasattr(mp_results, "hand_landmarks") and getattr(mp_results, "hand_landmarks"):
+            best = mp_results.hand_landmarks[0]
+            landmarks = [(float(lm.x), float(lm.y), float(lm.z)) for lm in best]
+        if hasattr(mp_results, "handedness") and getattr(mp_results, "handedness"):
+            handedness = mp_results.handedness[0]
+
+    if landmarks is None or len(landmarks) < 6:
+        return None
+
+    wrist_x = float(landmarks[0][0])
+    index_mcp_x = float(landmarks[5][0])
+    delta_x_norm = index_mcp_x - wrist_x
+    if abs(delta_x_norm) < 1e-6:
+        return None
+
+    raw_side = "right" if delta_x_norm > 0 else "left"
+    side_hint = raw_side
+
+    handed_label = None
+    if handedness is not None:
+        if isinstance(handedness, str):
+            handed_label = handedness.lower()
+        elif hasattr(handedness, "category_name"):
+            handed_label = str(handedness.category_name).lower()
+        elif hasattr(handedness, "categories") and handedness.categories:
+            handed_label = str(handedness.categories[0].category_name).lower()
+
+    mirrored_override = False
+    if handed_label in {"left", "right"}:
+        anatomy_side = "left" if handed_label == "left" else "right"
+        # Ha anatómia és kép-koordináta oldal ellentmond, tükörképes forrás gyanús.
+        if anatomy_side != raw_side:
+            side_hint = anatomy_side
+            mirrored_override = True
+
+    base_extend = int(CFG.get("nut_extend_amin_margin_px", 120))
+    fallback_extend = int(CFG.get("nut_fallback_extend_px", 80))
+    flip_logic = side_hint == "right"
+    extend_margin_px = int(round(base_extend * (1.25 if flip_logic else 1.0)))
+    fallback_extend_px = int(round(fallback_extend * (1.25 if flip_logic else 1.0)))
+
+    confidence = float(min(1.0, abs(delta_x_norm) / 0.25))
+    if img_shape is not None:
+        w = float(img_shape[1])
+        confidence = float(min(1.0, abs(delta_x_norm * w) / max(w * 0.25, 1.0)))
+
+    return {
+        "wrist_x_norm": wrist_x,
+        "index_mcp_x_norm": index_mcp_x,
+        "delta_x_norm": delta_x_norm,
+        "head_side": side_hint,
+        "side_hint": side_hint,
+        "raw_side_hint": raw_side,
+        "handedness": handed_label,
+        "mirrored_override": mirrored_override,
+        "flip_logic": flip_logic,
+        "extend_margin_px": extend_margin_px,
+        "fallback_extend_px": fallback_extend_px,
+        "confidence": confidence,
+    }
+
 def bgr2rgb(img: np.ndarray) -> np.ndarray:
     return img[:, :, ::-1].copy()
 
@@ -554,9 +641,15 @@ def step6b_find_nut(canon_bgr: np.ndarray,
     w = canon_bgr.shape[1]
     median_response = float(np.median(col_response))
     width_filter = bool(CFG.get("nut_width_filter_enabled", True))
-    width_constraints = CFG.get("nut_width_constraints", {}) or {}
-    min_fwhm = float(CFG.get("nut_min_width_px", width_constraints.get("min_px", 5.0)))
-    _max_cfg = CFG.get("nut_max_width_px", width_constraints.get("max_px", None))
+    width_constraints = CFG.get("nut_constraints", CFG.get("nut_width_constraints", {})) or {}
+    min_fwhm = float(CFG.get(
+        "nut_min_width_px",
+        width_constraints.get("min_width", width_constraints.get("min_px", 5.0)),
+    ))
+    _max_cfg = CFG.get(
+        "nut_max_width_px",
+        width_constraints.get("max_width", width_constraints.get("max_px", None)),
+    )
     max_fwhm = float(_max_cfg) if _max_cfg is not None else None
     n_cand = int(CFG.get("nut_n_candidates", 5))
     margin = int(CFG.get("nut_hand_margin_px", 10))

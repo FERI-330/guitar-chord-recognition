@@ -17,7 +17,11 @@ from src.config import CFG, PATHS
 from src.constants import (
     CANONICAL_H, FINGER_CHAINS, FINGER_THICK_MULT, FINGER_TIP_IDX
 )
-from src.geometry import _normalize_angle, step3_neck_angle
+from src.geometry import (
+    _normalize_angle,
+    step3_neck_angle,
+    detect_guitar_orientation as _detect_guitar_orientation,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,40 +240,8 @@ def get_fretboard_near_edge(landmarks: Optional[list],
 
 def detect_guitar_orientation(landmarks: Optional[list],
                               img_shape: tuple) -> Optional[dict]:
-    """A csukló és az index MCP relatív x-pozíciójából becsli az orientációt.
-
-    A visszaadott ``side_hint`` a nut keresési irányát adja meg.
-    Ha a hand-axis jobbra mutat, a nut is jobbra várható, ezért a nut-first
-    kiterjesztéshez nagyobb margin kerül használatra.
-    """
-    if landmarks is None or len(landmarks) < 6:
-        return None
-
-    h, w = img_shape[:2]
-    wrist_x = float(landmarks[0][0] * w)
-    index_x = float(landmarks[5][0] * w)
-    delta_x = index_x - wrist_x
-    if abs(delta_x) < 1e-6:
-        return None
-
-    head_side = "right" if delta_x > 0 else "left"
-    base_extend = int(CFG.get("nut_extend_amin_margin_px", 120))
-    fallback_extend = int(CFG.get("nut_fallback_extend_px", 80))
-    flip_logic = head_side == "right"
-    extend_margin_px = int(round(base_extend * (1.25 if flip_logic else 1.0)))
-    fallback_extend_px = int(round(fallback_extend * (1.25 if flip_logic else 1.0)))
-    confidence = float(min(1.0, abs(delta_x) / max(w * 0.25, 1.0)))
-    return {
-        "wrist_x_px": wrist_x,
-        "index_mcp_x_px": index_x,
-        "delta_x_px": delta_x,
-        "head_side": head_side,
-        "side_hint": head_side,
-        "flip_logic": flip_logic,
-        "extend_margin_px": extend_margin_px,
-        "fallback_extend_px": fallback_extend_px,
-        "confidence": confidence,
-    }
+    """Kompatibilitási wrapper a geometry.detect_guitar_orientation köré."""
+    return _detect_guitar_orientation({"landmarks": landmarks, "img_shape": img_shape})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
