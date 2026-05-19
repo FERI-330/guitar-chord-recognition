@@ -22,9 +22,10 @@ from src.config import CFG, FRET_ENGINE, FRET_ENGINE_FALLBACK
 from src.constants import CANONICAL_W, CANONICAL_H
 from src.geometry import (
     bgr2rgb, load_image_bgr,
-    step1_canny, step2_hough, step3_neck_angle, step4_split_lines,
+    step1_canny, step2_hough, step3_neck_angle, step3b_refine_neck_angle,
+    step4_split_lines,
     step5_outer_edges, step6_clamp_trapezoid_extent, step6_trapezoid, step6_warp,
-    step6b_find_nut, step6c_trim_to_nut,
+    step6b_find_nut, step6c_trim_to_nut, step6_extend_for_nut,
     step7_fret_lines_canonical, step8_fit_fret_rule,
 )
 from src.hand_landmark import (
@@ -519,6 +520,17 @@ def run_v14_pipeline(img_entry: dict,
             neck, split = neck_plain, split_plain
             neck["anchor_used"] = False
 
+    # Nyakirány finomítás bund-vonalakból (step3b).
+    # Megjegyzés: az alapértelmezett hough_min_len_frac=0.15 általában szűri a rövid
+    # fret-vonalakat, így ez a blokk csak kisebb frac érték esetén aktív.
+    if len(split["fret_lines"]) >= 3:
+        refined_angle = step3b_refine_neck_angle(neck["angle_deg"], split["fret_lines"])
+        if abs(refined_angle - neck["angle_deg"]) > 0.1:
+            split = step4_split_lines(lines, refined_angle)
+            neck = dict(neck)
+            neck["angle_deg"] = refined_angle
+            neck["angle_refined"] = True
+
     out["neck"] = neck
     out["split"] = split
 
@@ -569,6 +581,21 @@ def run_v14_pipeline(img_entry: dict,
     nut = step6b_find_nut(canon, side_hint=side_hint,
                           hand_boundary_canon_x=hand_bnd_x)
     out["nut"] = nut
+
+    # ── 10b. Nut fallback: ha nem detektálható, ROI bővítés és újra-keresés ─
+    if nut is None and side_hint is not None:
+        extend_px = int(CFG.get("nut_fallback_extend_px", 80))
+        corners_ext = step6_extend_for_nut(trap["corners_px"], H_inv, side_hint, extend_px)
+        if corners_ext is not None:
+            H_ext, H_ext_inv, canon_ext = step6_warp(img, corners_ext)
+            nut_ext = step6b_find_nut(canon_ext, side_hint=side_hint,
+                                      hand_boundary_canon_x=hand_bnd_x)
+            if nut_ext is not None:
+                H, H_inv, canon = H_ext, H_ext_inv, canon_ext
+                out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
+                out["nut"] = nut_ext
+                nut = nut_ext
+                print(f"  [nut_fallback] nut találat kiterjesztett ROI-ban @ x={nut['nut_x']}px")
 
     # ── 11. Nut-trim + re-warp ──────────────────────────────────────────────
     if nut is not None:
