@@ -13,6 +13,7 @@ Plug-and-Play bunddetektáló architektúra:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import contextlib
 from typing import Optional
 
 import cv2
@@ -28,12 +29,13 @@ from src.geometry import (
     step6b_find_nut, step6c_trim_to_nut, step6_extend_for_nut,
     step6d_shear_correction,
     step7_fret_lines_canonical, step8_fit_fret_rule,
+    detect_guitar_orientation,
 )
 from src.hand_landmark import (
     get_landmarker,
     step9_detect_landmarks, step9_project_fingertips,
     build_finger_mask, anchor_neck_angle, step3_neck_angle_anchored,
-    get_fretboard_near_edge, detect_guitar_orientation,
+    get_fretboard_near_edge,
 )
 
 # Modul-szintű lazy singleton a landmarker-hez
@@ -45,6 +47,20 @@ def _get_landmarker():
     if _landmarker is None:
         _landmarker = get_landmarker()
     return _landmarker
+
+
+@contextlib.contextmanager
+def _config_patch(**overrides):
+    """Temporarily override CFG values inside the pipeline."""
+    cfg_backup = {}
+    for key, value in overrides.items():
+        if key in CFG:
+            cfg_backup[key] = CFG[key]
+            CFG[key] = value
+    try:
+        yield
+    finally:
+        CFG.update(cfg_backup)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,20 +442,38 @@ class IntensityFretDetector(FretDetectorInterface):
             return 0.0
         return float(above.mean() / (below.mean() + 1e-9))
 
-    def _select_mode(self, shear: Optional[dict]) -> str:
+    def _select_mode(self, shear: Optional[dict]) -> tuple[str, dict]:
         """Shear-eredmény alapján Sobel-X vagy Max-pooling választása.
 
         Sobel-X (precizitás): residual < 0.3° és magas Hough-bizalom.
         Max-pooling (robusztus): minden más esetben, beleértve a kevés vonalat.
         """
         if shear is None:
-            return "max"
+            return "max", {
+                "strategy": "max",
+                "reason": "no_shear_info",
+                "residual_tilt_deg": None,
+                "hough_confidence": None,
+                "n_lines": 0,
+            }
         residual = abs(float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0))))
         confidence = float(shear.get("hough_confidence", 0.0))
         n_lines = int(shear.get("n_lines", 0))
         if n_lines >= 4 and residual < 0.3 and confidence >= 0.75:
-            return "sobel"
-        return "max"
+            return "sobel", {
+                "strategy": "sobel",
+                "reason": "low_residual_high_confidence",
+                "residual_tilt_deg": residual,
+                "hough_confidence": confidence,
+                "n_lines": n_lines,
+            }
+        return "max", {
+            "strategy": "max",
+            "reason": "high_tilt_or_low_confidence",
+            "residual_tilt_deg": residual,
+            "hough_confidence": confidence,
+            "n_lines": n_lines,
+        }
 
     # ── Nyilvános API ─────────────────────────────────────────────────────────
 
@@ -450,7 +484,7 @@ class IntensityFretDetector(FretDetectorInterface):
         Nyilvános metódus: vizualizálható a PipelineVisualizer-ből.
         """
         gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        active = self.mode if self.mode != "auto" else self._select_mode(shear)
+        active = self.mode if self.mode != "auto" else self._select_mode(shear)[0]
         return self._dispatch_profile(gray, active)
 
     def detect(self, canon_bgr: np.ndarray,
@@ -459,7 +493,10 @@ class IntensityFretDetector(FretDetectorInterface):
         from scipy.signal import find_peaks
 
         gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        active_mode = self.mode if self.mode != "auto" else self._select_mode(shear)
+        auto_meta = None
+        active_mode = self.mode
+        if self.mode == "auto":
+            active_mode, auto_meta = self._select_mode(shear)
         profile = self._dispatch_profile(gray, active_mode)
 
         # SNR-alapú fallback csak auto+sobel esetén: ha Sobel gyenge → Max-pooling
@@ -468,6 +505,13 @@ class IntensityFretDetector(FretDetectorInterface):
             if snr_val < self._SNR_FALLBACK_THR:
                 profile = self._max_profile(gray)
                 active_mode = "max"
+                if auto_meta is not None:
+                    auto_meta = {
+                        **auto_meta,
+                        "strategy": "max",
+                        "reason": "sobel_low_snr_fallback",
+                        "sobel_snr": snr_val,
+                    }
                 print(f"  [IntensityFretDetector] Sobel SNR={snr_val:.2f} → Max-pooling fallback")
 
         residual = None if shear is None else float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0)))
@@ -475,12 +519,26 @@ class IntensityFretDetector(FretDetectorInterface):
         _shear_info = "n/a" if shear is None else f"res={residual:.2f}° conf={confidence:.2f}"
         print(f"  [IntensityFretDetector] mode={active_mode} | shear={_shear_info}")
 
+        residual = abs(float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0)))) if shear else 0.0
+        conf = float(shear.get("hough_confidence", 0.0)) if shear else 0.0
+        dyn_prom = float(np.clip(
+            self.peak_prominence * (1.0 + residual / 0.6) * (1.0 + max(0.0, 0.7 - conf) * 0.5),
+            0.02,
+            0.35,
+        ))
+        min_width = 1.0 if active_mode == "sobel" else 2.0
+        max_width = float(np.clip(
+            self.peak_max_width + (3.0 if active_mode == "max" else 0.0) + min(residual * 4.0, 4.0),
+            min_width + 0.5,
+            24.0,
+        ))
+
         peak_idxs, _ = find_peaks(
             profile,
             height=self.peak_height,
             distance=self.peak_distance,
-            prominence=self.peak_prominence,
-            width=(0.0, self.peak_max_width),
+            prominence=dyn_prom,
+            width=(min_width, max_width),
         )
 
         fret_xs_raw = [float(i) for i in peak_idxs]
@@ -514,6 +572,14 @@ class IntensityFretDetector(FretDetectorInterface):
             fit = _make_empty_fit()
 
         fit["method"] = f"intensity_{active_mode}"
+        if auto_meta is not None:
+            auto_meta = {
+                **auto_meta,
+                "active_mode": active_mode,
+                "peak_prominence": dyn_prom,
+                "peak_width_min": min_width,
+                "peak_width_max": max_width,
+            }
         return {
             "fit":           fit,
             "fret_xs_raw":   fret_xs_raw,
@@ -522,6 +588,7 @@ class IntensityFretDetector(FretDetectorInterface):
             "method":        f"intensity_{active_mode}",
             "profile":       profile,
             "profile_mode":  active_mode,
+            "auto_strategy": auto_meta,
         }
 
 
@@ -586,7 +653,7 @@ def run_v14_pipeline(img_entry: dict,
     # ── 2. Anchor + ujjmaszk ────────────────────────────────────────────────
     anchor = anchor_neck_angle(landmarks, img.shape)
     out["anchor"] = anchor
-    orientation = detect_guitar_orientation(landmarks, img.shape)
+    orientation = detect_guitar_orientation({"landmarks": landmarks, "img_shape": img.shape})
     out["guitar_orientation"] = orientation
     finger_mask = build_finger_mask(img.shape, landmarks)
     out["finger_mask"] = finger_mask
@@ -661,7 +728,7 @@ def run_v14_pipeline(img_entry: dict,
         trap_overrides["nut_extend_amin_margin_px"] = int(orientation.get(
             "extend_margin_px", CFG.get("nut_extend_amin_margin_px", 120)
         ))
-    with config_patch(**trap_overrides):
+    with _config_patch(**trap_overrides):
         trap = step6_trapezoid(img, edge_info, landmarks=landmarks)
     out["trap"] = trap
     if trap is None:
@@ -753,6 +820,8 @@ def run_v14_pipeline(img_entry: dict,
             out["intensity_profile"] = det_result["profile"]
         if "profile_mode" in det_result:
             out["intensity_profile_mode"] = det_result["profile_mode"]
+        if "auto_strategy" in det_result:
+            out["intensity_auto_strategy"] = det_result["auto_strategy"]
     except Exception as exc:
         out["fit"] = None
         out["invalid_reason"] = f"fret_detection_failed: {exc}"

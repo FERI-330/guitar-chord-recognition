@@ -4,9 +4,17 @@ from pathlib import Path
 _root = Path(__file__).resolve().parent.parent
 
 # ── Nut width constraints ─────────────────────────────────────────────────
+# A nut szélessége tipikusan kb. 1.5x egy bundvastagság, de maradjon kisebb,
+# mint a kéz/ujjak vetített szélessége a kanonikus ROI-ban.
+NUT_CONSTRAINTS: dict = {
+    "min_width": 6.0,
+    "max_width": 18.0,
+}
+
+# Visszafelé kompatibilitás régi kulcsnevekkel.
 NUT_WIDTH_CONSTRAINTS: dict = {
-    "min_px": 5.0,
-    "max_px": 20.0,
+    "min_px": NUT_CONSTRAINTS["min_width"],
+    "max_px": NUT_CONSTRAINTS["max_width"],
 }
 
 # ── Fret detection engine defaults ────────────────────────────────────────
@@ -47,9 +55,10 @@ CFG: dict = {
     "trapezoid_clamp_margin_px": 120,    # ha BE: test-oldali margó px (régi hardcoded: 30)
     # STEP 6b – Nut detektálás
     "nut_width_filter_enabled": True,   # FWHM-alapú nut vs. bund diszkrimináció
+    "nut_constraints": NUT_CONSTRAINTS,
     "nut_width_constraints": NUT_WIDTH_CONSTRAINTS,
-    "nut_min_width_px": NUT_WIDTH_CONSTRAINTS["min_px"],   # minimális FWHM px, ami nut-ra utal
-    "nut_max_width_px": NUT_WIDTH_CONSTRAINTS["max_px"],   # maximális FWHM px (ujj kizárása); None = nincs felső korlát
+    "nut_min_width_px": NUT_CONSTRAINTS["min_width"],   # minimális FWHM px, ami nut-ra utal
+    "nut_max_width_px": NUT_CONSTRAINTS["max_width"],   # maximális FWHM px (ujj kizárása); None = nincs felső korlát
     "nut_n_candidates": 5,              # top-N csúcs vizsgálata (argmax helyett)
     # ── Kéz-határvezérelt Nut-keresési sáv ──────────────────────────────────
     "hand_boundary_enabled": True,      # landmark-alapú keresési sáv korlátozás
