@@ -31,6 +31,17 @@ plt.rcParams["figure.dpi"] = 96
 plt.rcParams["savefig.dpi"] = 120
 plt.rcParams["image.interpolation"] = "bilinear"
 
+# Ensure the Agg (non-interactive) backend doesn't silently swallow plt.show() calls.
+# In Jupyter notebooks %matplotlib inline overrides this; in scripts with a display
+# plt.ion() would switch to interactive mode.  We detect the backend at import time
+# and switch only when the caller hasn't already set up a GUI/inline backend.
+import matplotlib as _mpl
+if _mpl.get_backend().lower() in ("agg", ""):
+    try:
+        _mpl.use("module://matplotlib_inline.backend_inline")
+    except Exception:
+        pass  # not in a notebook environment – leave Agg as-is
+
 from src.config import CFG, PATHS, VIS_LINE_THICKNESS
 from src.constants import (
     CANONICAL_W, CANONICAL_H,

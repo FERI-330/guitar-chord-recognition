@@ -166,6 +166,38 @@
 - viz: az összetett vizuális függvények továbbra is külön figurát használnak, így a többkimenetes lépések nem írják felül egymást
 - ellenőrzés: a notebook futtatásakor az inline kimenet megjelenik, a mentett fájlok pedig továbbra is elkészülnek
 
+## 🗓️ 2026-05-19 – viz: enforced inline rendering for all visualization stages, ensuring real-time feedback in notebooks
+
+### Érintett fájlok és változtatások
+
+| Fájl | Változtatás |
+|---|---|
+| `src/viz.py` | Agg-backend guard hozzáadva: ha az aktív backend `'agg'` vagy üres, megkísérli az inline backend betöltését; import-szintű side-effect, catch-all fallback-kel |
+| `notebooks/04_feature_analysis.ipynb` | `%matplotlib inline` hozzáadva a setup cellához |
+| `notebooks/05a_baseline_ml.ipynb` | `%matplotlib inline` hozzáadva a setup cellához |
+| `notebooks/05b_cnn_finetune.ipynb` | `%matplotlib inline` hozzáadva a setup cellához |
+| `notebooks/06_comparison_dashboard.ipynb` | `draw_3panel_comparison(show=True)` és `draw_detector_comparison(show=True)` paraméter explicitté téve (cell 9 és 11); `plt.close(fig)` megmaradt memória-menedzsmenthez |
+
+### Ellenőrzött, változtatást nem igénylő fájlok
+
+- `src/viz.py` – minden publikus metódus tartalmazza az `if show: plt.show()` mintát, nincs `plt.close()` a `show()` előtt ✅
+- `notebooks/05_visual_demo.ipynb` – `%matplotlib inline` + `plt.show()` minden figure-cellában ✅
+- `notebooks/06_evaluation.ipynb` – előző session óta kész ✅
+- `notebooks/04_feature_analysis.ipynb` cells 06–17 – explicit `plt.show()` minden figure-cellában ✅
+- `notebooks/05a_baseline_ml.ipynb` cells 13–14 – explicit `plt.show()` ✅
+- `notebooks/05b_cnn_finetune.ipynb` cell 11 – explicit `plt.show()` ✅
+
+---
+
+## 🗓️ 2026-05-19 – viz: enabled visual sample evaluation in 06_evaluation.ipynb to complement numerical metrics
+
+- viz: `%matplotlib inline` hozzáadva a `06_evaluation.ipynb` setup cellájához
+- viz: új **5. szekció** (`## 5. Vizuális mintaértékelés`) bekerült a Confusion Matrix / Classification Report után, de még a `final_results.json` mentése előtt
+- viz: `_show_samples()` segédfüggvény implementálva: max 12 inch széles rács, DPI 96, `interpolation='bilinear'`, `equal` aspect ratio minden képnél
+- viz: SVM-hez és CNN-hez külön cellasor – mindkettőnél 5 véletlenszerű (seed=42) **sikeres** + max 5 **hibás** predikció jelenik meg, piros/zöld felirattal
+- viz: a képútvonalak a `load_features()` által visszaadott `data['paths']` listából jönnek – pontosan aligned `y_test`-tel és `pred_ml`-lel
+- viz: a megjelenítés NEM blokkol: a statisztikai cellák (Confusion Matrix, Classification Report, final_results.json) változatlanul lefutnak
+
 ---
 
 ## 🗓️ 2026-05-15 – Naplófrissítés: README és rövid összefoglaló
@@ -1201,3 +1233,5 @@ A 4. cella futtatásakor a gitárnyak + bund overlay + MediaPipe ujjak **azonnal
 - viz: `notebooks/05_visual_demo.ipynb` Cellák 9 (dashboard), 11 (kanonikus nézet), 13 (stílus-variánsok) végén `plt.close(fig)` → `plt.show()` csere; mentési DPI 150 → 120
 - viz: `notebooks/06_comparison_dashboard.ipynb` Cell 1-be bekerült a `%matplotlib inline` magic + DPI beállítások; cellák 9, 11-ből eltávolítva a redundáns `plt.show()` (a `draw_3panel_comparison` / `draw_detector_comparison` már tartalmazza, `show=True` default), a `plt.close(fig)` megmaradt memória-menedzsmenthez
 - fix: `src/viz.py` `draw_pipeline_grid` standalone függvényben `self._set_equal_aspect(ax)` → `vis._set_equal_aspect(ax)` NameError javítva (a `self` nem létezik osztályon kívüli függvényben)
+
+committed recent visualization and notebook display improvements
