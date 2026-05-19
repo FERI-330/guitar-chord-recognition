@@ -965,6 +965,204 @@ def plot_multi_training_histories(
     return fig
 
 
+def debug_nut_detection(
+    result: dict,
+    zoom_px: int = 100,
+    figsize: tuple = (13, 8),
+    show: bool = True,
+) -> Optional[plt.Figure]:
+    """3-panel Nut-diagnosztika egy run_v14_pipeline() result dictből.
+
+    Panel 1 – teljes kanonikus kép (600×80 px) a detektált Nut oszlopával.
+    Panel 2 – kinagyított Nut-környék (nyers képsáv) + függőleges intenzitás-profil.
+    Panel 3 – Sobel-X col_response 1D jel: keresési ablak, küszöb, FWHM-jelölő.
+
+    Opcionális debug tool – nem hívja az orchestrátort, csak result dictből olvas.
+
+    Args:
+        result:   run_v14_pipeline() kimenete.
+        zoom_px:  ±hány px-t mutasson a Nut körül a 2. panelen.
+        figsize:  matplotlib figsize.
+        show:     plt.show() meghívása az ábrán (False = csak a Figure visszaadása).
+
+    Returns:
+        plt.Figure vagy None (ha nem volt kanonikus kép).
+    """
+    canon = result.get("canon")
+    nut = result.get("nut")
+
+    if canon is None:
+        reason = result.get("invalid_reason", "ismeretlen")
+        print(f"[debug_nut] Nincs kanonikus kép. invalid_reason: {reason}")
+        return None
+
+    W = canon.shape[1]  # CANONICAL_W = 600
+    H_img = canon.shape[0]  # CANONICAL_H = 80
+
+    # col_response: step6b_find_nut tárolja a result dictben
+    col_response = nut.get("col_response") if nut else None
+    if col_response is None:
+        gray = cv2.cvtColor(canon, cv2.COLOR_BGR2GRAY)
+        sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        col_response = np.abs(sx).sum(axis=0).astype(np.float32)
+
+    nut_x = nut["nut_x"] if nut else None
+    side_hint = result.get("nut_side_hint")
+    hand_bnd_x = result.get("hand_boundary_canon_x")
+    min_offset = 5
+
+    # Keresési ablak határok (nominális – clamp nélkül, közelítő)
+    if side_hint is not None:
+        sw = max(int(W * 0.40), 10)
+        if side_hint == "left":
+            search_lo, search_hi = min_offset, min(sw, W - 1)
+        else:
+            search_lo, search_hi = max(0, W - sw), W - min_offset
+    else:
+        sw = max(int(W * 0.30), 10)
+        search_lo_l, search_hi_l = min_offset, min(sw, W - 1)
+        search_lo_r, search_hi_r = max(0, W - sw), W - min_offset
+        search_lo, search_hi = search_lo_l, search_hi_r
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(
+        3, 2,
+        height_ratios=[1.2, 2.5, 3.0],
+        width_ratios=[3.5, 1],
+        hspace=0.55, wspace=0.28,
+    )
+    ax_full  = fig.add_subplot(gs[0, :])
+    ax_zoom  = fig.add_subplot(gs[1, 0])
+    ax_vprof = fig.add_subplot(gs[1, 1])
+    ax_prof  = fig.add_subplot(gs[2, :])
+
+    # ── Panel 1: teljes kanonikus kép ─────────────────────────────────────────
+    ax_full.imshow(canon[:, :, ::-1], aspect="auto",
+                   extent=[0, W, H_img, 0])
+    if nut_x is not None:
+        ax_full.axvline(nut_x, color="lime", lw=2.0, alpha=0.95,
+                        label=f"Nut x={nut_x}px")
+        ax_full.legend(fontsize=8, loc="lower right")
+    if hand_bnd_x is not None:
+        ax_full.axvline(hand_bnd_x, color="red", lw=1.2, ls="--", alpha=0.7,
+                        label=f"Kézél={hand_bnd_x:.0f}px")
+    ax_full.set_title(
+        f"Kanonikus kép  |  osztály: {result.get('class', '?')}  |  "
+        f"{'✓ Nut @ x=' + str(nut_x) + 'px' if nut_x is not None else '✗ Nut NEM detektált'}",
+        fontsize=9,
+    )
+    ax_full.set_yticks([])
+    ax_full.set_xlabel("Kanonikus x [px]", fontsize=8)
+    ax_full.tick_params(labelsize=7)
+
+    # ── Panel 2a: kinagyított Nut-sáv ─────────────────────────────────────────
+    if nut_x is not None:
+        lo = max(0, nut_x - zoom_px)
+        hi = min(W, nut_x + zoom_px)
+        strip = canon[:, lo:hi]
+        ax_zoom.imshow(strip[:, :, ::-1], aspect="auto",
+                       extent=[lo, hi, H_img, 0])
+        ax_zoom.axvline(nut_x, color="lime", lw=1.8, alpha=0.9)
+        ax_zoom.set_title(f"Nut-környék (±{zoom_px}px)", fontsize=9)
+        ax_zoom.set_xlabel("Kanonikus x [px]", fontsize=8)
+        ax_zoom.tick_params(labelsize=7)
+    else:
+        ax_zoom.text(0.5, 0.5, "Nincs Nut-találat\na keresési tartományban",
+                     ha="center", va="center", transform=ax_zoom.transAxes,
+                     color="red", fontsize=10)
+        ax_zoom.set_facecolor("#fff0f0")
+        ax_zoom.axis("off")
+
+    # ── Panel 2b: függőleges intenzitás-profil a Nut oszlopán ─────────────────
+    if nut_x is not None:
+        gray_c = cv2.cvtColor(canon, cv2.COLOR_BGR2GRAY)
+        x_lo = max(0, nut_x - 2)
+        x_hi = min(W, nut_x + 3)
+        col_strip = gray_c[:, x_lo:x_hi].mean(axis=1)
+        ys = np.arange(len(col_strip))
+        ax_vprof.plot(col_strip, ys, color="steelblue", lw=1.6)
+        ax_vprof.invert_yaxis()
+        ax_vprof.set_title(f"Intenzitás\n@ x={nut_x}", fontsize=8)
+        ax_vprof.set_xlabel("Intenz.", fontsize=7)
+        ax_vprof.set_ylabel("y [px]", fontsize=7)
+        ax_vprof.tick_params(labelsize=6)
+        ax_vprof.grid(alpha=0.3)
+        ax_vprof.set_ylim(H_img - 0.5, -0.5)
+    else:
+        ax_vprof.axis("off")
+
+    # ── Panel 3: 1D col_response profil ──────────────────────────────────────
+    xs = np.arange(len(col_response))
+    ax_prof.plot(xs, col_response, color="steelblue", lw=1.3, alpha=0.85,
+                 label="Sobel-X |oszlopválasz|")
+    ax_prof.fill_between(xs, col_response, alpha=0.15, color="steelblue")
+
+    # Keresési ablak(ok) árnyékolva
+    if side_hint == "left":
+        ax_prof.axvspan(search_lo, search_hi, alpha=0.13, color="green",
+                        label=f"Keresési ablak (bal  {search_lo}–{search_hi}px, ~40%)")
+    elif side_hint == "right":
+        ax_prof.axvspan(search_lo, search_hi, alpha=0.13, color="green",
+                        label=f"Keresési ablak (jobb {search_lo}–{search_hi}px, ~40%)")
+    else:
+        ax_prof.axvspan(search_lo_l, search_hi_l, alpha=0.13, color="green",
+                        label=f"Keresési ablak (bal+jobb, ~30%)")
+        ax_prof.axvspan(search_lo_r, search_hi_r, alpha=0.13, color="green")
+
+    # Kézél határvonal
+    if hand_bnd_x is not None:
+        ax_prof.axvline(hand_bnd_x, color="red", lw=1.2, ls="--", alpha=0.7,
+                        label=f"Kézél={hand_bnd_x:.0f}px (keresés korlátozás)")
+
+    # Küszöb vonalak
+    median_r = float(np.median(col_response))
+    ax_prof.axhline(median_r * 2.5, color="darkorange", lw=1.1, ls="--", alpha=0.8,
+                    label=f"Küszöb 2.5× medián ({median_r * 2.5:.0f})")
+    ax_prof.axhline(median_r * 2.0, color="gold", lw=0.9, ls=":", alpha=0.6,
+                    label=f"Küszöb 2.0× medián ({median_r * 2.0:.0f}) [side_hint]")
+
+    # Detektált Nut jelölő + FWHM nyíl
+    if nut_x is not None:
+        peak_val = float(col_response[nut_x])
+        fwhm = float(nut.get("width_px", 0))
+        ratio = float(nut.get("ratio", 0))
+        ax_prof.axvline(nut_x, color="lime", lw=2.2,
+                        label=f"Nut x={nut_x}px  csúcs={peak_val:.0f}  arány={ratio:.2f}  FWHM={fwhm:.1f}px")
+        # FWHM jelölő nyíl
+        if fwhm > 0:
+            half_val = peak_val * 0.5
+            ax_prof.annotate(
+                "", xy=(nut_x + fwhm / 2, half_val),
+                xytext=(nut_x - fwhm / 2, half_val),
+                arrowprops=dict(arrowstyle="<->", color="lime", lw=1.5),
+            )
+            ax_prof.text(nut_x, half_val * 1.05, f"FWHM={fwhm:.1f}px",
+                         ha="center", va="bottom", fontsize=7, color="lime")
+
+    ax_prof.set_xlabel("Kanonikus x [px]", fontsize=9)
+    ax_prof.set_ylabel("Sobel-X oszlopválasz (összeg)", fontsize=9)
+    ax_prof.set_title("step6b_find_nut — 1D Sobel-X profil", fontsize=9)
+    ax_prof.legend(fontsize=7.5, loc="upper right")
+    ax_prof.grid(alpha=0.25)
+    ax_prof.set_xlim(0, W)
+
+    # Cím
+    nut_summary = (
+        f"side={nut['side']}  ratio={nut['ratio']:.2f}  FWHM={nut.get('width_px', 0):.1f}px"
+        if nut else "NEM DETEKTÁLT"
+    )
+    fig.suptitle(
+        f"Nut-diagnosztika  —  {result.get('fname', '?')}\n"
+        f"side_hint={side_hint}  |  {nut_summary}",
+        fontsize=10, y=1.01,
+    )
+
+    if show:
+        plt.show()
+    return fig
+
+
 def plot_scatter_2d(
     coords: np.ndarray,
     labels: np.ndarray,

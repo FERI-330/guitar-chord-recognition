@@ -438,7 +438,8 @@ def _make_default_fret_detector() -> FretDetectorInterface:
 
 def run_v14_pipeline(img_entry: dict,
                      landmarker=None,
-                     fret_detector: Optional[FretDetectorInterface] = None) -> dict:
+                     fret_detector: Optional[FretDetectorInterface] = None,
+                     preprocessor=None) -> dict:
     """Egy képre lefuttatja a V14 pipeline-t.
 
     Args:
@@ -472,6 +473,7 @@ def run_v14_pipeline(img_entry: dict,
     out["img"] = img
 
     # ── 1. MediaPipe landmarks ───────────────────────────────────────────────
+    # (Landmarks detektálása az eredeti képen fut — CLAHE ronthatja a MediaPipe teljesítményét)
     landmarks = step9_detect_landmarks(img_entry["path"], landmarker)
     out["landmarks"] = landmarks
 
@@ -480,6 +482,11 @@ def run_v14_pipeline(img_entry: dict,
     out["anchor"] = anchor
     finger_mask = build_finger_mask(img.shape, landmarks)
     out["finger_mask"] = finger_mask
+
+    # ── Pre-pipeline előfeldolgozás (opcionális) ─────────────────────────────
+    if preprocessor is not None:
+        img = preprocessor.process(img)
+        out["img_preprocessed"] = img
 
     # ── 3. Canny + maszkolás ────────────────────────────────────────────────
     edges = step1_canny(img)

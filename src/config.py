@@ -68,6 +68,20 @@ CFG: dict = {
     "num_classes": 8,
 }
 
+# ── Előfeldolgozás konfiguráció ───────────────────────────────────────────
+PREPROCESSING_CONFIG: dict = {
+    # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    "clahe_enabled":        True,
+    "clahe_clip_limit":     2.0,
+    "clahe_tile_grid_size": (8, 8),
+    # Gaussian Blur (pipeline-szintű pre-blur, elkülönül a Canny belső blur-jétől)
+    "blur_enabled":         False,
+    "blur_ksize":           3,
+    # Normalizálás
+    "normalize_enabled":    False,
+    "normalize_method":     "minmax",   # "minmax" | "histogram_eq"
+}
+
 # ── Elérési utak ───────────────────────────────────────────────────────────
 PATHS: dict = {
     "root": _root,
