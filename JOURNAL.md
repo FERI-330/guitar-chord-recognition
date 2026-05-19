@@ -159,6 +159,13 @@
 - fix: a notebook grid-eknél megszűnt az `aspect='auto'` kényszer, így a kör alakú formák nem nyúlnak ellipszissé
 - ellenőrzés: a mentett képek újragenerálása és a `dashboard.jpg` vizuális ellenőrzése következik
 
+## 🗓️ 2026-05-19 – viz: enabled automatic inline rendering for all generated images (canonical images, dashboards, and intermediate steps)
+
+- viz: a `notebooks/05_visual_demo.ipynb` első cellájába bekerült a `%matplotlib inline` magic
+- viz: a dashboard, canonical detail és style-variáns exportcellák most `plt.show()`-t hívnak mentés után is
+- viz: az összetett vizuális függvények továbbra is külön figurát használnak, így a többkimenetes lépések nem írják felül egymást
+- ellenőrzés: a notebook futtatásakor az inline kimenet megjelenik, a mentett fájlok pedig továbbra is elkészülnek
+
 ---
 
 ## 🗓️ 2026-05-15 – Naplófrissítés: README és rövid összefoglaló
@@ -1187,3 +1194,10 @@ A `05_visual_demo.ipynb` celláinak végén `plt.close(fig)` hívás szerepelt, 
 ### Eredmény
 
 A 4. cella futtatásakor a gitárnyak + bund overlay + MediaPipe ujjak **azonnal megjelenik** a cella alatt. A fájlmentés (`dashboard.jpg`) és az inline megjelenítés egyszerre történik: először `savefig`, majd `plt.show()`. A `show=False` opció szkriptekből való híváshoz megmarad.
+
+## 🗓️ 2026-05-19 – viz: enabled automatic inline rendering for all generated images (canonical images, dashboards, and intermediate steps)
+
+- viz: `notebooks/05_visual_demo.ipynb` Cell 1-be bekerült a `%matplotlib inline` magic, DPI értékek javítva: `figure.dpi=96`, `savefig.dpi=120` (illeszkedik `src/viz.py` globális beállításaihoz)
+- viz: `notebooks/05_visual_demo.ipynb` Cellák 9 (dashboard), 11 (kanonikus nézet), 13 (stílus-variánsok) végén `plt.close(fig)` → `plt.show()` csere; mentési DPI 150 → 120
+- viz: `notebooks/06_comparison_dashboard.ipynb` Cell 1-be bekerült a `%matplotlib inline` magic + DPI beállítások; cellák 9, 11-ből eltávolítva a redundáns `plt.show()` (a `draw_3panel_comparison` / `draw_detector_comparison` már tartalmazza, `show=True` default), a `plt.close(fig)` megmaradt memória-menedzsmenthez
+- fix: `src/viz.py` `draw_pipeline_grid` standalone függvényben `self._set_equal_aspect(ax)` → `vis._set_equal_aspect(ax)` NameError javítva (a `self` nem létezik osztályon kívüli függvényben)

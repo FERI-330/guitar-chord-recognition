@@ -3,14 +3,25 @@ from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent
 
+# ── Fret detection engine defaults ────────────────────────────────────────
+FRET_ENGINE = "INTENSITY_DATA"
+FRET_ENGINE_FALLBACK = "GEOMETRIC_RULE"
+
+# ── Vizuális alapértelmezések ─────────────────────────────────────────────
+VIS_LINE_THICKNESS = 5
+
 # ── Pipeline geometria ─────────────────────────────────────────────────────
 CFG: dict = {
+    # Vizuális megjelenítés
+    "vis_line_thickness": VIS_LINE_THICKNESS,
     # Kanonikus tér mérete
     "canonical_w": 600,
     "canonical_h": 80,
     # Fretboard fizika
     "n_frets": 24,
     "fret_rule": 17.817,
+    # Bunddetektáló motor alapértelmezés
+    "fret_engine": FRET_ENGINE,
     # STEP 1 – Canny
     "canny_low": 25,
     "canny_high": 80,

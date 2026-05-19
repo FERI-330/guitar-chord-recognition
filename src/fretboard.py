@@ -7,8 +7,8 @@ Forrás: 03c_pipeline_fixes_design.ipynb (V14), cellák 23, 25, 27.
 
 Plug-and-Play bunddetektáló architektúra:
   FretDetectorInterface  – ABC, közös interfész
-  GeometricFretDetector  – meglévő Hough+step8 logika (default)
-  IntensityFretDetector  – Sobel-X gradiens csúcsdetektálás + step8
+    GeometricFretDetector  – meglévő Hough+step8 logika (fallback)
+    IntensityFretDetector  – Sobel-X gradiens csúcsdetektálás + step8 (default)
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from src.config import CFG
+from src.config import CFG, FRET_ENGINE, FRET_ENGINE_FALLBACK
 from src.constants import CANONICAL_W, CANONICAL_H
 from src.geometry import (
     bgr2rgb, load_image_bgr,
@@ -352,6 +352,19 @@ class IntensityFretDetector(FretDetectorInterface):
         }
 
 
+_FRET_DETECTOR_FACTORIES = {
+    FRET_ENGINE_FALLBACK: GeometricFretDetector,
+    FRET_ENGINE: IntensityFretDetector,
+}
+
+
+def _make_default_fret_detector() -> FretDetectorInterface:
+    """A CFG-ben beállított alapértelmezett bunddetektor példányosítása."""
+    engine = str(CFG.get("fret_engine", FRET_ENGINE)).upper()
+    detector_cls = _FRET_DETECTOR_FACTORIES.get(engine, IntensityFretDetector)
+    return detector_cls()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # run_v14_pipeline – a fő orchestrátor
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,8 +378,8 @@ def run_v14_pipeline(img_entry: dict,
         img_entry:      dict {'path', 'class', ...} – általában manifest sor.
         landmarker:     HandLandmarker vagy None (ilyenkor lazy singleton).
         fret_detector:  ``FretDetectorInterface`` példány, vagy ``None``.
-                        ``None`` esetén ``GeometricFretDetector()`` (backward
-                        compatible, semmi nem törik el).
+                        ``None`` esetén a ``CFG['fret_engine']`` alapján
+                        példányosított motor (alapból ``INTENSITY_DATA``).
 
     Visszaad: dict minden közbülső artefaktummal + 'ok' flag.
     Plusz kulcs az alap result dicthez: 'fret_detector_method' str.
@@ -502,7 +515,7 @@ def run_v14_pipeline(img_entry: dict,
         out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
 
     # ── 12–14. Bunddetektálás (cserélhető detektor) ─────────────────────────
-    _detector = fret_detector if fret_detector is not None else GeometricFretDetector()
+    _detector = fret_detector if fret_detector is not None else _make_default_fret_detector()
     try:
         det_result = _detector.detect(out["canon"], nut=out.get("nut"))
         out["fret_xs_raw"]          = det_result["fret_xs_raw"]
