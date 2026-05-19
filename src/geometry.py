@@ -335,8 +335,47 @@ def step6_clamp_trapezoid_extent(edge_info: dict,
     return edge_info
 
 
-def step6_trapezoid(img_bgr: np.ndarray, edge_info: dict) -> Optional[dict]:
-    """A két kiválasztott él alapján felépíti a fretboard trapézot (v9)."""
+def _extend_amin_for_nut(a_min: float,
+                         neck_dir: np.ndarray,
+                         landmarks: list,
+                         img_shape: tuple) -> float:
+    """Kiterjeszti a_min-t a kéz Nut-oldali határa mögé.
+
+    A finger_mask eltávolítja a kéz éleit a Hough-ból, így a_min a kéz
+    UTÁN kezdődne. Ez a helper a landmark-vetületekből visszatolja a_min-t
+    a legközelebb lévő ujjhegy mögé, biztosítva, hogy a Nut beleessen
+    a trapézoidba.
+
+    Csak akkor aktív, ha CFG['nut_extend_amin_enabled'] = True.
+    """
+    if not bool(CFG.get("nut_extend_amin_enabled", True)):
+        return a_min
+    if landmarks is None or len(landmarks) < 5:
+        return a_min
+
+    margin = float(CFG.get("nut_extend_amin_margin_px", 40))
+    h, w = img_shape[:2]
+    alongs = [
+        float(np.dot(np.array([lx * w, ly * h], dtype=np.float64), neck_dir))
+        for (lx, ly, _) in landmarks
+    ]
+    landmark_min = min(alongs)
+    extended = landmark_min - margin
+    if extended < a_min:
+        print(f"  [extend_amin] a_min {a_min:.1f} → {extended:.1f} "
+              f"(landmark_min={landmark_min:.1f}, margin={margin:.0f}px)")
+        return extended
+    return a_min
+
+
+def step6_trapezoid(img_bgr: np.ndarray,
+                    edge_info: dict,
+                    landmarks: Optional[list] = None) -> Optional[dict]:
+    """A két kiválasztott él alapján felépíti a fretboard trapézot (v9).
+
+    Ha landmarks megadott és CFG['nut_extend_amin_enabled'], a_min kiterjed
+    a kéz Nut-oldali határa mögé, így a Nut biztosan beleesik a trapézoidba.
+    """
     if edge_info is None:
         return None
     edges = edge_info["selected_edges"]
@@ -356,6 +395,10 @@ def step6_trapezoid(img_bgr: np.ndarray, edge_info: dict) -> Optional[dict]:
     alongs = [float(np.dot(p, neck_dir)) for p in all_endpts]
     a_min = min(alongs)
     a_max = max(alongs)
+
+    # Nut-First: a_min kiterjesztése a kéz Nut-oldali határa mögé
+    if landmarks is not None:
+        a_min = _extend_amin_for_nut(a_min, neck_dir, landmarks, img_bgr.shape)
 
     # Clamp: csak a test-oldali határt (a_max) korlátozzuk a csukló mögé.
     # A Nut-oldalt (a_min) soha nem vágjuk: a Nut a csukló és a fejléc között van.
@@ -468,6 +511,8 @@ def step6b_find_nut(canon_bgr: np.ndarray,
     median_response = float(np.median(col_response))
     width_filter = bool(CFG.get("nut_width_filter_enabled", True))
     min_fwhm = float(CFG.get("nut_min_width_px", 5.0))
+    _max_cfg = CFG.get("nut_max_width_px", None)
+    max_fwhm = float(_max_cfg) if _max_cfg is not None else None
     n_cand = int(CFG.get("nut_n_candidates", 5))
     margin = int(CFG.get("nut_hand_margin_px", 10))
     hand_bnd_enabled = bool(CFG.get("hand_boundary_enabled", True))
@@ -513,10 +558,10 @@ def step6b_find_nut(canon_bgr: np.ndarray,
         heights = region[idxs]
         top_n = idxs[np.argsort(heights)[::-1][:n_cand]]
         # Szélességi szűrés: az első (legmagasabb) n_cand csúcs közül
-        # az első, amelynek FWHM >= min_fwhm
+        # az első, amelynek min_fwhm <= FWHM <= max_fwhm (ujjak kizárása)
         for ci in top_n:
             fwhm = _measure_peak_fwhm(col_response, int(ci) + offset)
-            if fwhm >= min_fwhm:
+            if fwhm >= min_fwhm and (max_fwhm is None or fwhm <= max_fwhm):
                 return int(ci), float(region[ci]), fwhm
         # Ha egyik sem elég széles, visszaesünk a legmagasabbra
         ci = top_n[0]

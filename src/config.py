@@ -42,11 +42,15 @@ CFG: dict = {
     # STEP 6b – Nut detektálás
     "nut_width_filter_enabled": True,   # FWHM-alapú nut vs. bund diszkrimináció
     "nut_min_width_px": 5.0,            # minimális FWHM px, ami nut-ra utal
+    "nut_max_width_px": 20.0,           # maximális FWHM px (ujj kizárása); None = nincs felső korlát
     "nut_n_candidates": 5,              # top-N csúcs vizsgálata (argmax helyett)
     # ── Kéz-határvezérelt Nut-keresési sáv ──────────────────────────────────
     "hand_boundary_enabled": True,      # landmark-alapú keresési sáv korlátozás
     "nut_hand_margin_px": 10,           # biztonsági margó a kézél előtt (canon px)
     "hand_boundary_edge_guard_frac": 0.25,  # kézél < 25% képszéltől → ablak nem korlátoz
+    # ── Nut-First: trapézoid kiterjesztése a kéz felé ────────────────────────
+    "nut_extend_amin_enabled": True,    # a_min kiterjesztése landmark-alapon (Nut-First)
+    "nut_extend_amin_margin_px": 40,    # extra margó a legközelebbi landmark mögé (px)
     # STEP 8 – Fret rule fitting
     "step8_tol_px": 10.0,
     "step8_ratio_tol": 0.08,

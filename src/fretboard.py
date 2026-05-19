@@ -536,8 +536,8 @@ def run_v14_pipeline(img_entry: dict,
     # ── 6b. Trapézoid along-extent clamp a csuklóhoz ────────────────────────
     edge_info = step6_clamp_trapezoid_extent(edge_info, anchor)
 
-    # ── 7. Trapézoid ────────────────────────────────────────────────────────
-    trap = step6_trapezoid(img, edge_info)
+    # ── 7. Trapézoid (Nut-First: landmarks alapján kiterjesztett a_min) ────────
+    trap = step6_trapezoid(img, edge_info, landmarks=landmarks)
     out["trap"] = trap
     if trap is None:
         out["invalid_reason"] = "no_trapezoid"
