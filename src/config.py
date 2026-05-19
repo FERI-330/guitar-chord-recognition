@@ -3,6 +3,12 @@ from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent
 
+# ── Nut width constraints ─────────────────────────────────────────────────
+NUT_WIDTH_CONSTRAINTS: dict = {
+    "min_px": 5.0,
+    "max_px": 20.0,
+}
+
 # ── Fret detection engine defaults ────────────────────────────────────────
 FRET_ENGINE = "INTENSITY_DATA"
 FRET_ENGINE_FALLBACK = "GEOMETRIC_RULE"
@@ -41,8 +47,9 @@ CFG: dict = {
     "trapezoid_clamp_margin_px": 120,    # ha BE: test-oldali margó px (régi hardcoded: 30)
     # STEP 6b – Nut detektálás
     "nut_width_filter_enabled": True,   # FWHM-alapú nut vs. bund diszkrimináció
-    "nut_min_width_px": 5.0,            # minimális FWHM px, ami nut-ra utal
-    "nut_max_width_px": 20.0,           # maximális FWHM px (ujj kizárása); None = nincs felső korlát
+    "nut_width_constraints": NUT_WIDTH_CONSTRAINTS,
+    "nut_min_width_px": NUT_WIDTH_CONSTRAINTS["min_px"],   # minimális FWHM px, ami nut-ra utal
+    "nut_max_width_px": NUT_WIDTH_CONSTRAINTS["max_px"],   # maximális FWHM px (ujj kizárása); None = nincs felső korlát
     "nut_n_candidates": 5,              # top-N csúcs vizsgálata (argmax helyett)
     # ── Kéz-határvezérelt Nut-keresési sáv ──────────────────────────────────
     "hand_boundary_enabled": True,      # landmark-alapú keresési sáv korlátozás
