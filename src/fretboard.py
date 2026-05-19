@@ -635,6 +635,8 @@ def run_v14_pipeline(img_entry: dict,
         "ok": False,
         "invalid_reason": None,
         "fret_detector_method": "none",
+        "intensity_profile_mode": None,
+        "intensity_auto_strategy": None,
     }
 
     # ── Kép betöltés ────────────────────────────────────────────────────────
@@ -814,7 +816,15 @@ def run_v14_pipeline(img_entry: dict,
         out["fret_xs_filt"]         = det_result["fret_xs_filt"]
         out["removed_pairs"]        = det_result["removed_pairs"]
         out["fit"]                  = det_result["fit"]
-        out["fret_detector_method"] = det_result.get("method", "unknown")
+        method_label = str(det_result.get("method", "unknown"))
+        if method_label.startswith("intensity"):
+            out["fret_detector_method"] = "intensity"
+            out["fret_detector_detail"] = method_label
+        elif method_label.startswith("geometric"):
+            out["fret_detector_method"] = "geometric"
+            out["fret_detector_detail"] = method_label
+        else:
+            out["fret_detector_method"] = method_label
         # IntensityFretDetector esetén a gradiens-profil és aktív mód is elérhető
         if "profile" in det_result:
             out["intensity_profile"] = det_result["profile"]
