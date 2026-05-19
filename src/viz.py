@@ -1163,6 +1163,186 @@ def debug_nut_detection(
     return fig
 
 
+def draw_master_dashboard(
+    result: dict,
+    figsize: Optional[tuple] = None,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+) -> plt.Figure:
+    """5-panel Master Dashboard egyetlen run_v14_pipeline() result dict-ből.
+
+    Panelek (2 sor):
+      Sor 1 — Nyers kép | Maszk + Landmarks | Kiegyenesített ROI (2×széles) | Intenzitás-profil
+      Sor 2 — Végső gitárnyak-rekonstrukció (teljes szélesség)
+
+    Args:
+        result:    ``run_v14_pipeline()`` kimenete.
+        figsize:   Matplotlib figsize; None esetén automatikus méretezés.
+        save_path: Opcionális PNG/JPG mentési útvonal.
+        show:      ``plt.show()`` meghívása (False = csak Figure visszaad).
+
+    Returns:
+        Matplotlib Figure.
+    """
+    import cv2 as _cv2
+
+    viz = PipelineVisualizer()
+
+    img_bgr  = result.get("img")
+    fmask    = result.get("finger_mask")
+    canon    = result.get("canon")
+    profile  = result.get("intensity_profile")
+    nut      = result.get("nut")
+    fret_xs  = result.get("fret_xs_filt", [])
+    ok       = result.get("ok", False)
+    cls      = result.get("class", "?")
+    fname    = result.get("fname", result.get("filename", ""))
+    cov      = (result.get("fit") or {}).get("coverage_ratio", 0.0)
+    mode_lbl = result.get("intensity_profile_mode", result.get("fret_detector_method", "?"))
+
+    fallback_w = 18.0
+    fallback_h = 7.0
+    if img_bgr is not None:
+        h_img, w_img = img_bgr.shape[:2]
+        fallback_w = max(fallback_w, w_img / 80.0)
+        fallback_h = max(fallback_h, fallback_w * (h_img / w_img) * 0.35)
+
+    fig_size, scale = viz._resolve_figsize_with_scale(
+        figsize, (min(fallback_w, MAX_FIG_WIDTH), min(fallback_h, MAX_FIG_HEIGHT))
+    )
+
+    fig = plt.figure(figsize=fig_size)
+    gs  = plt.GridSpec(2, 5,
+                       height_ratios=[3, 2],
+                       hspace=0.38, wspace=0.30,
+                       figure=fig)
+
+    status_str = "✓ OK" if ok else f"✗ {result.get('invalid_reason', '')}"
+    fig.suptitle(
+        f"Master Dashboard  [{cls}]  {fname}  |  {status_str}  "
+        f"|  profil: {mode_lbl}  |  coverage: {cov:.2f}",
+        fontsize=viz._font_size(11, scale, minimum=8),
+        fontweight="bold",
+    )
+
+    # ── Panel 1: Nyers kép ────────────────────────────────────────────────────
+    ax1 = fig.add_subplot(gs[0, 0])
+    if img_bgr is not None:
+        ax1.imshow(img_bgr[:, :, ::-1], interpolation="bilinear")
+    else:
+        ax1.set_facecolor("#f0f0f0")
+        ax1.text(0.5, 0.5, "n/a", ha="center", va="center",
+                 transform=ax1.transAxes, color="gray")
+    ax1.set_title("Nyers kép", fontsize=viz._font_size(9, scale, minimum=7))
+    ax1.axis("off")
+
+    # ── Panel 2: Maszk + Landmarks ────────────────────────────────────────────
+    ax2 = fig.add_subplot(gs[0, 1])
+    if img_bgr is not None:
+        vis_mask = img_bgr.copy()
+        if fmask is not None and fmask.any():
+            tint = np.zeros_like(vis_mask)
+            tint[fmask > 0] = [60, 60, 220]
+            vis_mask = _cv2.addWeighted(vis_mask, 0.6, tint, 0.4, 0)
+        lm = result.get("landmarks")
+        if lm:
+            vis_mask = viz.draw_landmarks(vis_mask, lm)
+        ax2.imshow(vis_mask[:, :, ::-1], interpolation="bilinear")
+    else:
+        ax2.set_facecolor("#f0f0f0")
+    ax2.set_title("Maszk + Landmarks", fontsize=viz._font_size(9, scale, minimum=7))
+    ax2.axis("off")
+
+    # ── Panel 3: Kiegyenesített ROI (2 oszlopnyi) ─────────────────────────────
+    ax3 = fig.add_subplot(gs[0, 2:4])
+    if canon is not None:
+        vis_canon = canon.copy()
+        ch = canon.shape[0]
+        for fx in fret_xs:
+            xi = int(round(float(fx)))
+            _cv2.line(vis_canon, (xi, 0), (xi, ch), (80, 80, 240), 1, _cv2.LINE_AA)
+        if nut is not None:
+            nx = int(round(float(nut["nut_x"])))
+            _cv2.line(vis_canon, (nx, 0), (nx, ch), (0, 220, 100), 2, _cv2.LINE_AA)
+        ax3.imshow(vis_canon[:, :, ::-1], aspect="auto", interpolation="bilinear")
+        nut_str = f"@{int(nut['nut_x'])}px" if nut else "n/a"
+        ax3.set_title(
+            f"Kiegyenesített ROI (600×80 px)  nut={nut_str}  frets={len(fret_xs)}",
+            fontsize=viz._font_size(8.5, scale, minimum=7),
+        )
+    else:
+        ax3.set_facecolor("#f8e8e8")
+        ax3.text(0.5, 0.5, f"ROI n/a\n{result.get('invalid_reason', '')}",
+                 ha="center", va="center", transform=ax3.transAxes,
+                 color="red", fontsize=viz._font_size(9, scale, minimum=7))
+    ax3.axis("off")
+
+    # ── Panel 4: Intenzitás-profil ────────────────────────────────────────────
+    ax4 = fig.add_subplot(gs[0, 4])
+    if profile is not None:
+        xs = np.arange(len(profile))
+        ax4.fill_between(xs, profile, alpha=0.28, color="steelblue")
+        ax4.plot(xs, profile, color="steelblue",
+                 lw=viz._line_width(1.3, scale, minimum=0.8))
+        if nut is not None:
+            nx = int(round(float(nut["nut_x"])))
+            nv = float(profile[min(nx, len(profile) - 1)])
+            ax4.axvline(nx, color="#2ecc71", lw=viz._line_width(2.0, scale, minimum=1.0))
+            ax4.plot(nx, nv, "*", color="#2ecc71", markersize=10,
+                     label=f"Nut @{nx}px")
+        for i, fx in enumerate(fret_xs):
+            fv = float(profile[min(int(fx), len(profile) - 1)])
+            ax4.axvline(fx, color="#e74c3c", lw=0.7, alpha=0.7)
+            ax4.plot(fx, fv, "^", color="#e74c3c", markersize=4,
+                     label="Frets" if i == 0 else "")
+        ax4.set_xlim(0, len(profile))
+        ax4.set_ylim(0, 1.05)
+        if nut is not None or fret_xs:
+            ax4.legend(fontsize=viz._font_size(6.5, scale, minimum=5),
+                       loc="upper right", framealpha=0.7)
+        ax4.grid(alpha=0.22)
+        ax4.set_xlabel("Kanonikus x [px]", fontsize=viz._font_size(7, scale, minimum=6))
+        ax4.set_ylabel("Norm. profil", fontsize=viz._font_size(7, scale, minimum=6))
+        ax4.tick_params(labelsize=viz._font_size(6, scale, minimum=5))
+    else:
+        ax4.text(0.5, 0.5, "Profil\nn/a", ha="center", va="center",
+                 transform=ax4.transAxes, color="gray",
+                 fontsize=viz._font_size(9, scale, minimum=7))
+    ax4.set_title(f"Intenzitás-profil\n({mode_lbl})",
+                  fontsize=viz._font_size(8.5, scale, minimum=7))
+
+    # ── Panel 5: Végső rekonstrukció (teljes szélesség, 2. sor) ───────────────
+    ax5 = fig.add_subplot(gs[1, :])
+    if img_bgr is not None:
+        if ok:
+            vis_final = viz.draw_fretboard_overlay(img_bgr, result)
+            lm = result.get("landmarks")
+            if lm:
+                vis_final = viz.draw_landmarks(vis_final, lm)
+        else:
+            vis_final = img_bgr.copy()
+        ax5.imshow(vis_final[:, :, ::-1], interpolation="bilinear")
+        nut_side = result.get("nut_side_hint", "?")
+        title_5 = (
+            f"Végső rekonstrukció  |  nut_side={nut_side}  "
+            f"|  frets={len(fret_xs)}  |  coverage={cov:.3f}"
+            if ok else
+            f"Rekonstrukció SIKERTELEN: {result.get('invalid_reason', '?')}"
+        )
+        ax5.set_title(title_5,
+                      fontsize=viz._font_size(9, scale, minimum=7),
+                      color="black" if ok else "red")
+    else:
+        ax5.set_facecolor("#f0f0f0")
+    ax5.axis("off")
+
+    if save_path is not None:
+        _save_figure(fig, save_path)
+    if show:
+        plt.show()
+    return fig
+
+
 def plot_scatter_2d(
     coords: np.ndarray,
     labels: np.ndarray,

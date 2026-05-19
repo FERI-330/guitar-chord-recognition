@@ -372,6 +372,7 @@ class IntensityFretDetector(FretDetectorInterface):
         peak_prominence: float = 0.06,
         peak_max_width: float = 14.0,
         suppress_pairs: bool = True,
+        power: float = 2.0,
     ) -> None:
         self.mode            = mode
         self.sobel_ksize     = sobel_ksize
@@ -381,6 +382,7 @@ class IntensityFretDetector(FretDetectorInterface):
         self.peak_prominence = peak_prominence
         self.peak_max_width  = peak_max_width
         self.suppress_pairs  = suppress_pairs
+        self.power           = power
 
     # ── Belső segédmetódusok ──────────────────────────────────────────────────
 
@@ -398,6 +400,24 @@ class IntensityFretDetector(FretDetectorInterface):
     def _max_profile(self, gray: np.ndarray) -> np.ndarray:
         """Oszloponkénti maximum – dőlésre-invariáns, robusztus."""
         return self._norm_smooth(gray.max(axis=0).astype(np.float32))
+
+    def _linear_profile(self, gray: np.ndarray) -> np.ndarray:
+        """Oszloponkénti átlag – baseline referencia."""
+        return self._norm_smooth(gray.mean(axis=0))
+
+    def _power_profile(self, gray: np.ndarray) -> np.ndarray:
+        """Power transform: mean((gray/255)^power) – csúcserősítés."""
+        return self._norm_smooth(((gray / 255.0) ** self.power).mean(axis=0))
+
+    def _dispatch_profile(self, gray: np.ndarray, mode: str) -> np.ndarray:
+        """Profil mód szerinti dispatch (linear | power | max | sobel)."""
+        if mode == "linear":
+            return self._linear_profile(gray)
+        if mode == "power":
+            return self._power_profile(gray)
+        if mode == "max":
+            return self._max_profile(gray)
+        return self._sobel_profile(gray)
 
     def _snr(self, profile: np.ndarray, thr: float = 0.30) -> float:
         above = profile[profile >= thr]
@@ -431,9 +451,7 @@ class IntensityFretDetector(FretDetectorInterface):
         """
         gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         active = self.mode if self.mode != "auto" else self._select_mode(shear)
-        if active == "max":
-            return self._max_profile(gray)
-        return self._sobel_profile(gray)
+        return self._dispatch_profile(gray, active)
 
     def detect(self, canon_bgr: np.ndarray,
                nut: Optional[dict] = None,
@@ -442,13 +460,9 @@ class IntensityFretDetector(FretDetectorInterface):
 
         gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         active_mode = self.mode if self.mode != "auto" else self._select_mode(shear)
+        profile = self._dispatch_profile(gray, active_mode)
 
-        if active_mode == "max":
-            profile = self._max_profile(gray)
-        else:
-            profile = self._sobel_profile(gray)
-
-        # SNR-alapú fallback: ha Sobel profil gyenge, Max-pooling-ra vált
+        # SNR-alapú fallback csak auto+sobel esetén: ha Sobel gyenge → Max-pooling
         if active_mode == "sobel" and self.mode == "auto":
             snr_val = self._snr(profile)
             if snr_val < self._SNR_FALLBACK_THR:
