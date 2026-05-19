@@ -738,7 +738,7 @@ def step6_extend_for_nut(corners_px: np.ndarray,
 def step6d_shear_correction(canon_bgr: np.ndarray,
                              min_lines: int = 4,
                              angle_tol_from_vert: float = 30.0,
-                             min_tilt_deg: float = 2.0,
+                             min_tilt_deg: float = 0.5,
                              min_len_frac: float = 0.20) -> dict:
     """Post-warp shear korrekció a bund-dőlés kiegyenesítéséhez.
 
@@ -1320,3 +1320,7 @@ def step8_fit_fret_rule(detected_x: list,
         "score": score,
         "nut_anchored": fit_method == "nut_anchored",
     }
+
+
+# Public alias — plug-and-play névegyezmény
+step7b_refine_shear = step6d_shear_correction
