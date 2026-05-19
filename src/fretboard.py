@@ -31,6 +31,7 @@ from src.hand_landmark import (
     get_landmarker,
     step9_detect_landmarks, step9_project_fingertips,
     build_finger_mask, anchor_neck_angle, step3_neck_angle_anchored,
+    get_fretboard_near_edge,
 )
 
 # Modul-szintű lazy singleton a landmarker-hez
@@ -159,6 +160,48 @@ def _choose_nut_side(anchor: Optional[dict],
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Landmark → kanonikus tér vetítés
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _project_landmark_to_canon(lm_px: tuple[float, float],
+                               H: np.ndarray) -> Optional[float]:
+    """Egy pixel-koordinátát H homográfián vetít a kanonikus térbe.
+
+    Visszaad: kanonikus x-koordináta (float), vagy None ha H degenerate.
+    """
+    pt = np.array([lm_px[0], lm_px[1], 1.0])
+    proj = H @ pt
+    if abs(proj[2]) < 1e-9:
+        return None
+    return float(proj[0] / proj[2])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-fit fantom-bund szűrés
+# ─────────────────────────────────────────────────────────────────────────────
+
+def refine_frets_by_fit(fret_xs: list,
+                        fit: dict,
+                        tol_px: float) -> list:
+    """Csak azokat a fret_xs pozíciókat tartja meg, amelyek az előrejelzett
+    bundpozíció ±tol_px sugarán belül vannak.
+
+    Ha a fit üres (nincs predicted_x), az eredeti listát adja vissza.
+    Így a függvény mindig biztonságos fallback-ként viselkedik.
+    """
+    pred = fit.get("predicted_x", {})
+    if not pred or not fret_xs:
+        return list(fret_xs)
+    pred_vals = list(pred.values())
+    kept = []
+    for x in fret_xs:
+        nearest_dist = min(abs(x - px) for px in pred_vals)
+        if nearest_dist <= tol_px:
+            kept.append(x)
+    return kept
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Bunddetektáló architektúra – FretDetectorInterface + implementációk
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -221,12 +264,24 @@ class GeometricFretDetector(FretDetectorInterface):
         fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
 
         nut_side = nut["side"] if nut else None
+        refine_enabled = bool(CFG.get("fret_refine_enabled", True))
+        refine_tol = float(CFG.get("fret_refine_tol_px", 12.0))
+
         try:
-            fit = step8_fit_fret_rule(
+            fit_pass1 = step8_fit_fret_rule(
                 fret_xs_filt,
                 nut_anchored=(nut_side is not None),
                 nut_side=nut_side,
             )
+            if refine_enabled:
+                fret_xs_filt = refine_frets_by_fit(fret_xs_filt, fit_pass1, refine_tol)
+                fit = step8_fit_fret_rule(
+                    fret_xs_filt,
+                    nut_anchored=(nut_side is not None),
+                    nut_side=nut_side,
+                )
+            else:
+                fit = fit_pass1
         except Exception as exc:
             print(f"  [GeometricFretDetector] step8 hiba: {exc}")
             fit = _make_empty_fit()
@@ -331,12 +386,24 @@ class IntensityFretDetector(FretDetectorInterface):
             fret_xs_filt, removed_pairs = fret_xs_raw, []
 
         nut_side = nut["side"] if nut else None
+        refine_enabled = bool(CFG.get("fret_refine_enabled", True))
+        refine_tol = float(CFG.get("fret_refine_tol_px", 12.0))
+
         try:
-            fit = step8_fit_fret_rule(
+            fit_pass1 = step8_fit_fret_rule(
                 fret_xs_filt,
                 nut_anchored=(nut_side is not None),
                 nut_side=nut_side,
             )
+            if refine_enabled:
+                fret_xs_filt = refine_frets_by_fit(fret_xs_filt, fit_pass1, refine_tol)
+                fit = step8_fit_fret_rule(
+                    fret_xs_filt,
+                    nut_anchored=(nut_side is not None),
+                    nut_side=nut_side,
+                )
+            else:
+                fit = fit_pass1
         except Exception as exc:
             print(f"  [IntensityFretDetector] step8 hiba: {exc}")
             fit = _make_empty_fit()
@@ -481,10 +548,19 @@ def run_v14_pipeline(img_entry: dict,
     H, H_inv, canon = step6_warp(img, trap["corners_px"])
     out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
 
-    # ── 10. Nut detektálás (side_hint-alapú egyoldalas keresés) ─────────────
+    # ── 10. Nut detektálás (side_hint + hand_boundary alapú keresés) ─────────
     side_hint = _choose_nut_side(anchor, H, img.shape)
     out["nut_side_hint"] = side_hint
-    nut = step6b_find_nut(canon, side_hint=side_hint)
+
+    # Kézél vetítése a kanonikus térbe → Nut-keresési sáv korlátozása
+    hand_bnd_x: Optional[float] = None
+    near_edge = get_fretboard_near_edge(landmarks, img.shape)
+    if near_edge is not None:
+        hand_bnd_x = _project_landmark_to_canon(near_edge, H)
+    out["hand_boundary_canon_x"] = hand_bnd_x
+
+    nut = step6b_find_nut(canon, side_hint=side_hint,
+                          hand_boundary_canon_x=hand_bnd_x)
     out["nut"] = nut
 
     # ── 11. Nut-trim + re-warp ──────────────────────────────────────────────

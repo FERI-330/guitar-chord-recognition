@@ -416,81 +416,164 @@ def step6_warp(img_bgr: np.ndarray,
 # STEP 6b/6c – Nut detektálás
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _measure_peak_fwhm(profile: np.ndarray, peak_x: int) -> float:
+    """Full Width at Half Maximum a profil `peak_x` pozíciójánál.
+
+    A Nut fizikailag 1.5–2× vastagabb mint egy bund → FWHM > ~5px.
+    Bundcsúcsoknál FWHM tipikusan 2–4px.
+
+    Visszaad: FWHM pixelben (float). Ismeretlen/szélső esetén: 0.0.
+    """
+    n = len(profile)
+    if peak_x <= 0 or peak_x >= n - 1:
+        return 0.0
+    half = float(profile[peak_x]) * 0.5
+    # Bal oldal: hol esik a profil a félérték alá
+    left = peak_x
+    while left > 0 and profile[left] >= half:
+        left -= 1
+    # Jobb oldal: hol esik a profil a félérték alá
+    right = peak_x
+    while right < n - 1 and profile[right] >= half:
+        right += 1
+    return float(right - left)
+
+
 def step6b_find_nut(canon_bgr: np.ndarray,
                     search_frac: float = 0.30,
                     threshold_factor: float = 2.5,
                     min_offset: int = 5,
-                    side_hint: Optional[str] = None) -> Optional[dict]:
+                    side_hint: Optional[str] = None,
+                    hand_boundary_canon_x: Optional[float] = None) -> Optional[dict]:
     """Megkeresi a nutot (0. bund) a kanonikus képen Sobel-x alapján.
 
     Ha side_hint ('left'/'right') adott, csak azt az oldalt vizsgálja
     kiterjesztett (40%) keresési sávval és alacsonyabb (2.0×) küszöbbel.
+
+    Ha hand_boundary_canon_x megadott (CFG['hand_boundary_enabled']),
+    a keresési sáv felső határát `hand_boundary_canon_x - nut_hand_margin_px`-re
+    korlátozza, így a kézen belül nem keres Nut-jelöltet.
+
+    Ha CFG['nut_width_filter_enabled'], top-N jelöltet vizsgál FWHM alapján
+    (argmax helyett), és csak a minimális szélességet meghaladó csúcsot fogadja el.
     """
+    from scipy.signal import find_peaks as _find_peaks
+
     gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY)
     sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     col_response = np.abs(sx).sum(axis=0).astype(np.float32)
 
     w = canon_bgr.shape[1]
     median_response = float(np.median(col_response))
+    width_filter = bool(CFG.get("nut_width_filter_enabled", True))
+    min_fwhm = float(CFG.get("nut_min_width_px", 5.0))
+    n_cand = int(CFG.get("nut_n_candidates", 5))
+    margin = int(CFG.get("nut_hand_margin_px", 10))
+    hand_bnd_enabled = bool(CFG.get("hand_boundary_enabled", True))
+
+    def _clamp_sw(sw: int, is_left: bool) -> int:
+        """Korlátozza a keresési sáv végét a kézél előtt."""
+        if not (hand_bnd_enabled and hand_boundary_canon_x is not None):
+            return sw
+        if is_left:
+            limit = int(hand_boundary_canon_x) - margin
+            return min(sw, max(min_offset + 1, limit))
+        else:
+            limit = w - int(hand_boundary_canon_x) - margin
+            return min(sw, max(min_offset + 1, limit))
+
+    def _best_candidate(region: np.ndarray, offset: int) -> tuple[int, float, float]:
+        """Top-N csúcs közül FWHM-szűréssel a legjobb jelölt.
+
+        Visszaad: (local_argmax, peak_val, fwhm_px)
+        """
+        if not width_filter or len(region) < 3:
+            idx = int(np.argmax(region))
+            fwhm = _measure_peak_fwhm(col_response, idx + offset)
+            return idx, float(region[idx]), fwhm
+
+        # find_peaks a régión – top-N a magasság szerint
+        idxs, props = _find_peaks(region, height=0.0)
+        if len(idxs) == 0:
+            idx = int(np.argmax(region))
+            fwhm = _measure_peak_fwhm(col_response, idx + offset)
+            return idx, float(region[idx]), fwhm
+
+        heights = region[idxs]
+        top_n = idxs[np.argsort(heights)[::-1][:n_cand]]
+        # Szélességi szűrés: az első (legmagasabb) n_cand csúcs közül
+        # az első, amelynek FWHM >= min_fwhm
+        for ci in top_n:
+            fwhm = _measure_peak_fwhm(col_response, int(ci) + offset)
+            if fwhm >= min_fwhm:
+                return int(ci), float(region[ci]), fwhm
+        # Ha egyik sem elég széles, visszaesünk a legmagasabbra
+        ci = top_n[0]
+        fwhm = _measure_peak_fwhm(col_response, int(ci) + offset)
+        return int(ci), float(region[ci]), fwhm
 
     if side_hint is not None:
         # Egyoldalas keresés: kiterjesztett régió, lazább küszöb
-        sw = max(int(w * 0.40), 10)
+        sw_raw = max(int(w * 0.40), 10)
         thr = 2.0 * (median_response + 1e-6)
         if side_hint == "left":
+            sw = _clamp_sw(sw_raw, is_left=True)
             region = col_response[min_offset:sw]
             if len(region) == 0:
                 return None
-            peak = float(region.max())
-            nut_x = int(np.argmax(region)) + min_offset
+            local_idx, peak, fwhm = _best_candidate(region, min_offset)
+            nut_x = local_idx + min_offset
         else:
+            sw = _clamp_sw(sw_raw, is_left=False)
             region = col_response[w - sw:w - min_offset]
             if len(region) == 0:
                 return None
-            peak = float(region.max())
-            nut_x = (w - sw) + int(np.argmax(region))
+            local_idx, peak, fwhm = _best_candidate(region, w - sw)
+            nut_x = (w - sw) + local_idx
+
         ratio = peak / (median_response + 1e-6)
-        print(f"  [nut_detect_v11] side_hint={side_hint} | "
-              f"median={median_response:.0f} | peak={peak:.0f} | ratio={ratio:.2f}")
+        print(f"  [nut_detect_v12] side_hint={side_hint} | "
+              f"median={median_response:.0f} | peak={peak:.0f} | "
+              f"ratio={ratio:.2f} | fwhm={fwhm:.1f}px")
         if peak < thr:
-            print(f"  [nut_detect_v11] nincs egyértelmű nut (ratio={ratio:.2f} < 2.0)")
+            print(f"  [nut_detect_v12] nincs egyértelmű nut (ratio={ratio:.2f} < 2.0)")
             return None
-        print(f"  [nut_detect_v11] nut találat: {side_hint} oldal @ x={nut_x}px")
+        print(f"  [nut_detect_v12] nut találat: {side_hint} @ x={nut_x}px (fwhm={fwhm:.1f}px)")
         return {"side": side_hint, "nut_x": nut_x, "peak": peak, "ratio": ratio,
-                "col_response": col_response}
+                "width_px": fwhm, "col_response": col_response}
 
     # Kétoldalas fallback (side_hint=None esetén)
-    sw = max(int(w * search_frac), 10)
-    left_region = col_response[min_offset:sw]
-    right_region = col_response[w - sw:w - min_offset]
+    sw_raw = max(int(w * search_frac), 10)
+    sw_l = _clamp_sw(sw_raw, is_left=True)
+    sw_r = _clamp_sw(sw_raw, is_left=False)
+    left_region = col_response[min_offset:sw_l]
+    right_region = col_response[w - sw_r:w - min_offset]
 
     if len(left_region) == 0 or len(right_region) == 0:
         return None
 
-    left_peak_val = float(left_region.max())
-    right_peak_val = float(right_region.max())
+    l_idx, left_peak_val, l_fwhm = _best_candidate(left_region, min_offset)
+    r_idx, right_peak_val, r_fwhm = _best_candidate(right_region, w - sw_r)
     threshold = threshold_factor * (median_response + 1e-6)
 
     if left_peak_val >= right_peak_val:
-        side = "left"
-        peak = left_peak_val
-        nut_x = int(np.argmax(left_region)) + min_offset
+        side, peak, nut_x, fwhm = "left", left_peak_val, l_idx + min_offset, l_fwhm
     else:
-        side = "right"
-        peak = right_peak_val
-        nut_x = (w - sw) + int(np.argmax(right_region))
+        side, peak, nut_x, fwhm = "right", right_peak_val, (w - sw_r) + r_idx, r_fwhm
 
     ratio = peak / (median_response + 1e-6)
-    print(f"  [nut_detect_v10] median={median_response:.0f} | "
-          f"left_peak={left_peak_val:.0f} | right_peak={right_peak_val:.0f}")
+    print(f"  [nut_detect_v12] median={median_response:.0f} | "
+          f"left_peak={left_peak_val:.0f}(w={l_fwhm:.1f}) | "
+          f"right_peak={right_peak_val:.0f}(w={r_fwhm:.1f})")
 
     if peak < threshold:
-        print(f"  [nut_detect_v10] nincs egyértelmű nut (peak/median={ratio:.2f} < {threshold_factor})")
+        print(f"  [nut_detect_v12] nincs egyértelmű nut (peak/median={ratio:.2f} < {threshold_factor})")
         return None
 
-    print(f"  [nut_detect_v10] nut találat: {side} oldal @ x={nut_x}px (ratio={ratio:.2f})")
+    print(f"  [nut_detect_v12] nut találat: {side} @ x={nut_x}px "
+          f"(ratio={ratio:.2f}, fwhm={fwhm:.1f}px)")
     return {"side": side, "nut_x": nut_x, "peak": peak, "ratio": ratio,
-            "col_response": col_response}
+            "width_px": fwhm, "col_response": col_response}
 
 
 def step6c_trim_to_nut(corners_px: np.ndarray,

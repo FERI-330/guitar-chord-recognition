@@ -36,11 +36,21 @@ CFG: dict = {
     "step5_angle_tol": 15,
     "step5_outlier_ratio": 2.5,
     "step5_expansion_margin_frac": 0.30,
+    # STEP 6b – Nut detektálás
+    "nut_width_filter_enabled": True,   # FWHM-alapú nut vs. bund diszkrimináció
+    "nut_min_width_px": 5.0,            # minimális FWHM px, ami nut-ra utal
+    "nut_n_candidates": 5,              # top-N csúcs vizsgálata (argmax helyett)
+    # ── Kéz-határvezérelt Nut-keresési sáv ──────────────────────────────────
+    "hand_boundary_enabled": True,      # landmark-alapú keresési sáv korlátozás
+    "nut_hand_margin_px": 10,           # biztonsági margó a kézél előtt (canon px)
     # STEP 8 – Fret rule fitting
     "step8_tol_px": 10.0,
     "step8_ratio_tol": 0.08,
     "step8_scale_min_factor": 1.0,
     "step8_scale_max_factor": 8.0,
+    # ── Fantom-bund szűrés (post-fit refine) ────────────────────────────────
+    "fret_refine_enabled": True,        # kétlépéses illesztés a phantomok ellen
+    "fret_refine_tol_px": 12.0,        # ±tol az előrejelzett pozícióhoz képest
     # ── Training ──────────────────────────────────────────────────────────
     "random_seed": 42,
     "img_size": 224,
