@@ -23,7 +23,7 @@ from src.constants import CANONICAL_W, CANONICAL_H
 from src.geometry import (
     bgr2rgb, load_image_bgr,
     step1_canny, step2_hough, step3_neck_angle, step4_split_lines,
-    step5_outer_edges, step6_trapezoid, step6_warp,
+    step5_outer_edges, step6_clamp_trapezoid_extent, step6_trapezoid, step6_warp,
     step6b_find_nut, step6c_trim_to_nut,
     step7_fret_lines_canonical, step8_fit_fret_rule,
 )
@@ -155,7 +155,7 @@ def _choose_nut_side(anchor: Optional[dict],
     if abs(proj[2]) < 1e-9:
         return None
     cx = float(proj[0] / proj[2])
-    return "right" if cx < CANONICAL_W / 2.0 else "left"
+    return "left" if cx < CANONICAL_W / 2.0 else "right"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,6 +459,9 @@ def run_v14_pipeline(img_entry: dict,
         out["invalid_reason"] = "no_outer_edges"
         return out
 
+    # ── 6b. Trapézoid along-extent clamp a csuklóhoz ────────────────────────
+    edge_info = step6_clamp_trapezoid_extent(edge_info, anchor)
+
     # ── 7. Trapézoid ────────────────────────────────────────────────────────
     trap = step6_trapezoid(img, edge_info)
     out["trap"] = trap
@@ -478,33 +481,10 @@ def run_v14_pipeline(img_entry: dict,
     H, H_inv, canon = step6_warp(img, trap["corners_px"])
     out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
 
-    # ── 10. Nut detektálás + anchor override ────────────────────────────────
+    # ── 10. Nut detektálás (side_hint-alapú egyoldalas keresés) ─────────────
     side_hint = _choose_nut_side(anchor, H, img.shape)
     out["nut_side_hint"] = side_hint
-    nut = step6b_find_nut(canon)
-
-    if side_hint is not None and (nut is None or nut.get("side") != side_hint):
-        gray = cv2.cvtColor(canon, cv2.COLOR_BGR2GRAY)
-        sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        col_response = np.abs(sx).sum(axis=0).astype(np.float32)
-        w = canon.shape[1]
-        sw = max(int(w * 0.30), 10)
-        min_off = 5
-        med = float(np.median(col_response))
-        if side_hint == "left":
-            region = col_response[min_off:sw]
-            nx = int(np.argmax(region)) + min_off
-            peak = float(region.max())
-        else:
-            region = col_response[w - sw:w - min_off]
-            nx = (w - sw) + int(np.argmax(region))
-            peak = float(region.max())
-        ratio = peak / (med + 1e-6)
-        if ratio >= 2.0:
-            nut = {"side": side_hint, "nut_x": nx, "peak": peak,
-                   "ratio": ratio, "col_response": col_response,
-                   "from_anchor_override": True}
-
+    nut = step6b_find_nut(canon, side_hint=side_hint)
     out["nut"] = nut
 
     # ── 11. Nut-trim + re-warp ──────────────────────────────────────────────

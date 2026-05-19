@@ -168,6 +168,21 @@ def build_finger_mask(img_shape: tuple,
     palm_only = cv2.dilate(palm_only, k_palm)
     mask = cv2.bitwise_or(mask, palm_only)
 
+    # Alkar-kiterjesztés: a csukló irányában maszkoljuk a forearm-élek forrását
+    forearm_extend = CFG.get("forearm_extend_scale", 1.5)
+    if forearm_extend > 0:
+        wrist_pt = np.array(pts_px[0], dtype=np.float64)
+        mcp_center_pt = mcp_pts.mean(axis=0)
+        forearm_dir = wrist_pt - mcp_center_pt
+        fd_len = float(np.linalg.norm(forearm_dir))
+        if fd_len > 1e-3:
+            forearm_dir /= fd_len
+            extend_px = int(round(hand_scale * forearm_extend))
+            arm_end = (wrist_pt + forearm_dir * extend_px).astype(int)
+            arm_thick = max(int(round(hand_scale * 0.8)), 6)
+            cv2.line(mask, tuple(pts_px[0]), tuple(arm_end), 255,
+                     thickness=arm_thick, lineType=cv2.LINE_AA)
+
     if dilate_px > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                       (dilate_px * 2 + 1, dilate_px * 2 + 1))
