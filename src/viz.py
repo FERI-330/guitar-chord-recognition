@@ -850,7 +850,7 @@ def draw_pipeline_grid(
         canon = r.get("canon") if r.get("ok") else None
         if canon is not None:
                 ax.imshow(canon[:, :, ::-1], interpolation="bilinear")
-                self._set_equal_aspect(ax)
+                vis._set_equal_aspect(ax)
         else:
             ax.set_facecolor("#f8e8e8" if not r.get("ok") else "#f0f0f0")
         ax.set_title(f"[{r.get('class','?')}] {'OK' if r.get('ok') else 'FAIL'}\n"

@@ -21,12 +21,13 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
 
-from src.config import PATHS
+from src.config import CFG, PATHS
 from src.fretboard import (
     FretDetectorInterface,
     GeometricFretDetector,
     IntensityFretDetector,
     run_v14_pipeline,
+    _make_default_fret_detector,
     _make_empty_fit,
 )
 from src.features import assemble_feature_vector, FEATURE_DIM
@@ -120,6 +121,30 @@ def test_intensity_profile_shape() -> bool:
         _fail(f"Profil nem normalizált: min={profile.min():.3f}  max={profile.max():.3f}")
         return False
     _pass(f"IntensityFretDetector.gradient_profile: shape={profile.shape}  max={profile.max():.3f}")
+    return True
+
+
+def test_default_detector_factory() -> bool:
+    """A default motor intensity-alapú, de a geometric fallback is él."""
+    original_engine = CFG.get("fret_engine")
+    try:
+        default_det = _make_default_fret_detector()
+        if not isinstance(default_det, IntensityFretDetector):
+            _fail(f"Default detector nem intensity: {type(default_det).__name__}")
+            return False
+
+        CFG["fret_engine"] = "GEOMETRIC_RULE"
+        fallback_det = _make_default_fret_detector()
+        if not isinstance(fallback_det, GeometricFretDetector):
+            _fail(f"Fallback detector nem geometric: {type(fallback_det).__name__}")
+            return False
+    finally:
+        if original_engine is None:
+            CFG.pop("fret_engine", None)
+        else:
+            CFG["fret_engine"] = original_engine
+
+    _pass("Default detector factory: INTENSITY_DATA + GEOMETRIC_RULE fallback")
     return True
 
 
