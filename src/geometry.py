@@ -554,8 +554,9 @@ def step6b_find_nut(canon_bgr: np.ndarray,
     w = canon_bgr.shape[1]
     median_response = float(np.median(col_response))
     width_filter = bool(CFG.get("nut_width_filter_enabled", True))
-    min_fwhm = float(CFG.get("nut_min_width_px", 5.0))
-    _max_cfg = CFG.get("nut_max_width_px", None)
+    width_constraints = CFG.get("nut_width_constraints", {}) or {}
+    min_fwhm = float(CFG.get("nut_min_width_px", width_constraints.get("min_px", 5.0)))
+    _max_cfg = CFG.get("nut_max_width_px", width_constraints.get("max_px", None))
     max_fwhm = float(_max_cfg) if _max_cfg is not None else None
     n_cand = int(CFG.get("nut_n_candidates", 5))
     margin = int(CFG.get("nut_hand_margin_px", 10))
@@ -809,12 +810,16 @@ def step6d_shear_correction(canon_bgr: np.ndarray,
         print(f"  [shear_corr] kevés vonal ({len(tilts)}<{min_lines}) → kihagyva")
         return _no
 
+    tilt_std = float(np.std(tilts)) if len(tilts) > 1 else 0.0
+    hough_confidence = float(np.clip((len(tilts) / float(min_lines)) * 0.5 + (1.0 - min(tilt_std / 12.0, 1.0)) * 0.5, 0.0, 1.0))
+
     alpha_deg = float(np.average(tilts, weights=weights))
-    print(f"  [shear_corr] n={len(tilts)} | α={alpha_deg:.2f}°", end=" | ")
+    print(f"  [shear_corr] n={len(tilts)} | α={alpha_deg:.2f}° | conf={hough_confidence:.2f}", end=" | ")
 
     if abs(alpha_deg) < min_tilt_deg:
         print("nincs korrekció")
-        return {**_no, "shear_angle_deg": alpha_deg}
+        return {**_no, "shear_angle_deg": alpha_deg, "residual_shear_deg": abs(alpha_deg),
+                "tilt_std_deg": tilt_std, "hough_confidence": hough_confidence}
 
     s = float(np.tan(np.radians(alpha_deg)))
     # Kanonikus térben: dst(x,y) ← src(x + s·y, y)  →  x_corr = x − s·y rögzíti a bundot
@@ -834,6 +839,9 @@ def step6d_shear_correction(canon_bgr: np.ndarray,
     print(f"s={s:.4f} → korrigált")
     return {
         "shear_angle_deg": alpha_deg,
+        "residual_shear_deg": abs(alpha_deg),
+        "tilt_std_deg": tilt_std,
+        "hough_confidence": hough_confidence,
         "S":     S,
         "S_inv": S_inv,
         "corrected": True,

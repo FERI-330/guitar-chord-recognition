@@ -33,7 +33,7 @@ from src.hand_landmark import (
     get_landmarker,
     step9_detect_landmarks, step9_project_fingertips,
     build_finger_mask, anchor_neck_angle, step3_neck_angle_anchored,
-    get_fretboard_near_edge,
+    get_fretboard_near_edge, detect_guitar_orientation,
 )
 
 # Modul-szintű lazy singleton a landmarker-hez
@@ -374,7 +374,7 @@ class IntensityFretDetector(FretDetectorInterface):
         suppress_pairs: bool = True,
         power: float = 2.0,
     ) -> None:
-        self.mode            = mode
+        self.mode            = str(mode).lower()
         self.sobel_ksize     = sobel_ksize
         self.smooth_sigma    = smooth_sigma
         self.peak_height     = peak_height
@@ -429,15 +429,15 @@ class IntensityFretDetector(FretDetectorInterface):
     def _select_mode(self, shear: Optional[dict]) -> str:
         """Shear-eredmény alapján Sobel-X vagy Max-pooling választása.
 
-        Sobel-X (precizitás): shear korrigált VAGY bizonyítottan ≈0 (n≥4, |α|<0.2°)
-        Max-pooling (robusztus): ismeretlen/maradt dőlés (kevés vonal, stb.)
+        Sobel-X (precizitás): residual < 0.3° és magas Hough-bizalom.
+        Max-pooling (robusztus): minden más esetben, beleértve a kevés vonalat.
         """
         if shear is None:
-            return "sobel"
-        corrected = bool(shear.get("corrected", False))
-        angle     = abs(float(shear.get("shear_angle_deg", 0.0)))
-        n_lines   = int(shear.get("n_lines", 0))
-        if corrected or (n_lines >= 4 and angle < 0.2):
+            return "max"
+        residual = abs(float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0))))
+        confidence = float(shear.get("hough_confidence", 0.0))
+        n_lines = int(shear.get("n_lines", 0))
+        if n_lines >= 4 and residual < 0.3 and confidence >= 0.75:
             return "sobel"
         return "max"
 
@@ -470,7 +470,9 @@ class IntensityFretDetector(FretDetectorInterface):
                 active_mode = "max"
                 print(f"  [IntensityFretDetector] Sobel SNR={snr_val:.2f} → Max-pooling fallback")
 
-        _shear_info = "n/a" if shear is None else f"{shear.get('shear_angle_deg', 0):.2f}°"
+        residual = None if shear is None else float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0)))
+        confidence = None if shear is None else float(shear.get("hough_confidence", 0.0))
+        _shear_info = "n/a" if shear is None else f"res={residual:.2f}° conf={confidence:.2f}"
         print(f"  [IntensityFretDetector] mode={active_mode} | shear={_shear_info}")
 
         peak_idxs, _ = find_peaks(
@@ -584,6 +586,8 @@ def run_v14_pipeline(img_entry: dict,
     # ── 2. Anchor + ujjmaszk ────────────────────────────────────────────────
     anchor = anchor_neck_angle(landmarks, img.shape)
     out["anchor"] = anchor
+    orientation = detect_guitar_orientation(landmarks, img.shape)
+    out["guitar_orientation"] = orientation
     finger_mask = build_finger_mask(img.shape, landmarks)
     out["finger_mask"] = finger_mask
 
@@ -651,8 +655,14 @@ def run_v14_pipeline(img_entry: dict,
     # ── 6b. Trapézoid along-extent clamp a csuklóhoz ────────────────────────
     edge_info = step6_clamp_trapezoid_extent(edge_info, anchor)
 
-    # ── 7. Trapézoid (Nut-First: landmarks alapján kiterjesztett a_min) ────────
-    trap = step6_trapezoid(img, edge_info, landmarks=landmarks)
+    # ── 7. Trapézoid (Nut-First: orientation-adapted kiterjesztés) ───────────
+    trap_overrides = {}
+    if orientation is not None:
+        trap_overrides["nut_extend_amin_margin_px"] = int(orientation.get(
+            "extend_margin_px", CFG.get("nut_extend_amin_margin_px", 120)
+        ))
+    with config_patch(**trap_overrides):
+        trap = step6_trapezoid(img, edge_info, landmarks=landmarks)
     out["trap"] = trap
     if trap is None:
         out["invalid_reason"] = "no_trapezoid"
@@ -671,7 +681,7 @@ def run_v14_pipeline(img_entry: dict,
     out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
 
     # ── 10. Nut detektálás (side_hint + hand_boundary alapú keresés) ─────────
-    side_hint = _choose_nut_side(anchor, H, img.shape, landmarks=landmarks)
+    side_hint = orientation["side_hint"] if orientation and orientation.get("side_hint") else _choose_nut_side(anchor, H, img.shape, landmarks=landmarks)
     out["nut_side_hint"] = side_hint
 
     # Kézél vetítése a kanonikus térbe → Nut-keresési sáv korlátozása
@@ -687,7 +697,7 @@ def run_v14_pipeline(img_entry: dict,
 
     # ── 10b. Nut fallback: ha nem detektálható, ROI bővítés és újra-keresés ─
     if nut is None and side_hint is not None:
-        extend_px = int(CFG.get("nut_fallback_extend_px", 80))
+        extend_px = int(orientation.get("fallback_extend_px", CFG.get("nut_fallback_extend_px", 80))) if orientation else int(CFG.get("nut_fallback_extend_px", 80))
         corners_ext = step6_extend_for_nut(trap["corners_px"], H_inv, side_hint, extend_px)
         if corners_ext is not None:
             H_ext, H_ext_inv, canon_ext = step6_warp(img, corners_ext)
