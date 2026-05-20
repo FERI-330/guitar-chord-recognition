@@ -2,6 +2,59 @@
 
 ---
 
+## 🗓️ 2026-05-20 – Warp skálázás javítása: Megakadályozzuk a rövid trapézok túlzott vízszintes nyújtását a No-Hand módnál
+
+### Motiváció
+
+A `step6_warp` mindig `CANONICAL_W=600px` széles kanonikus képre warpolja a forrástrapézt.
+Ha a trapéz tényleges horizontális kiterjedése pl. 100–150px, a warp 4–6×-os felskálázást
+végez → a kanonikus kép pixelált, elmosódott.
+Ezenkívül ha a fallback vonalak az akép csak egy szűk X-sávban (pl. 10–20% szélessége)
+koncentrálódnak, a warpolt ROI nem tartalmazza a nyak nagy részét.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+1. **Warp stretch detektálás + `canon_natural`** (shear korrekció blokk után, fret detektor előtt):
+   - `_src_len` (trapézoid horizontális kiterjedése) és `_src_hgt` (függőleges) számítása.
+   - `_dyn_w = round(_src_len * CANO_H / _src_hgt)`, korlátok: `[CANO_W//4, CANO_W]`.
+   - `warp_stretch_factor = CANO_W / dyn_w` — ha > 1.5: szignifikáns nyújtás.
+   - Ha `stretch > 1.5`: `out["canon_natural"] = cv2.resize(canon, (dyn_w, CANO_H), INTER_AREA)`.
+     Ez a természetes arányú, nem-pixelált változat — **csak vizualizációhoz**.
+     `out["canon"]` marad 600×80-on (ML pipeline nem érintett).
+   - `out["warp_dyn_w"]`, `out["warp_stretch_factor"]`, `out["debug_info"]["warp_stretch"]` bejegyzések.
+
+2. **Fallback ROI vízszintes kiterjesztés** (Y-clamp blokk után, `roi_min_height` előtt):
+   - Csak ha `debug_info["hough"]["fallback"] == "global_hough_no_hand"`.
+   - Ha a fallback vonalak X-kiterjedése < 30% a képszélességhez képest:
+     trapézoid sarokpontokat a nyakszög irányában ±30% képszélességgel tolja.
+   - `debug_info["fallback_horiz_extend"]`: `x_coverage_before`, `extend_px`, `neck_angle_deg`.
+
+3. **`low_confidence` flag** (az `out["ok"] = True` előtt):
+   - `True` ha `coverage_ratio < 0.20` VAGY `warp_stretch_factor > 2.0`.
+   - CFG kulcsok: `low_confidence_cov_thr` (default 0.20), `low_confidence_stretch_thr` (default 2.0).
+   - `out["debug_info"]["confidence"]`: `low_confidence`, `coverage_ratio`, `warp_stretch_factor`.
+
+**`src/viz_diagnostics.py`**
+
+4. **Panel [3] Warped ROI**:
+   - Ha `canon_natural` elérhető, azt jeleníti meg (természetes arányú, élesebb kép).
+   - Ha `warp_stretch > 1.5`: `⚡ stretch N.N× →Mpx` narancssárga overlay + cím tag.
+5. **Panel [15] Összefoglaló** — új `── Warp / Konfidencia ──` blokk:
+   - `low_conf`: OK / ⚠ ALACSONY
+   - `stretch`: szorzó
+   - `dyn_w`: természetes szélesség (std=600px referenciával)
+
+### Architektúra-invariancia
+
+- `out["canon"]` változatlan (600×80, ML pipeline érintetlen).
+- `canon_natural` **csak vizualizációhoz** kerül bele; feature extraction (`assemble_feature_vector`,
+  `get_ml_ready_payload`) nem olvassa ezt a kulcsot.
+- `low_confidence` metaadat — az ML modell figyelembe veheti, de a pipeline nem blokkolja emiatt.
+
+---
+
 ## 🗓️ 2026-05-20 – No Hand mód stabilizálása: adaptív orientáció-őr, ROI-centrálás és hossz-alapú szűrés
 
 ### Motiváció

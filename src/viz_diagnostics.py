@@ -104,6 +104,10 @@ def create_full_pipeline_audit(image, results, save_path=None):
     nut_direction = results.get("nut_direction", "unknown")
     dir_arrow   = "← Nut" if not is_flipped else "Nut →"
     dir_color   = "#2ecc71" if not is_flipped else "#e67e22"
+    canon_natural   = results.get("canon_natural")          # display-quality (non-stretched)
+    warp_stretch    = float(results.get("warp_stretch_factor", 1.0))
+    warp_dyn_w      = results.get("warp_dyn_w")
+    low_confidence  = bool(results.get("low_confidence", False))
 
     # Prototype nut + inlays – csak vizualizációhoz
     _proto_nut = None
@@ -260,17 +264,25 @@ def create_full_pipeline_audit(image, results, save_path=None):
         trap_ok_flag = bool(results.get("trap_ok", True))
         trap_reasons = results.get("trap_reasons") or []
         if canon is not None:
-            ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB), aspect="auto")
+            _disp = canon_natural if canon_natural is not None else canon
+            ax.imshow(cv2.cvtColor(_disp, cv2.COLOR_BGR2RGB), aspect="auto")
             if not trap_ok_flag:
                 reasons_str = ", ".join(trap_reasons)
                 ax.text(0.5, 0.04, f"⚠ Gyenge trapéz: {reasons_str}",
                         ha="center", va="bottom", transform=ax.transAxes,
                         fontsize=6, color="orange", fontweight="bold",
                         bbox=dict(facecolor="black", alpha=0.55, pad=2, boxstyle="round"))
-            title = (f"Warped ROI (F1)  {canon.shape[1]}×{canon.shape[0]}px"
+            if warp_stretch > 1.5:
+                ax.text(0.02, 0.96, f"⚡ stretch {warp_stretch:.1f}×  →{warp_dyn_w}px",
+                        ha="left", va="top", transform=ax.transAxes,
+                        fontsize=6, color="#e67e22",
+                        bbox=dict(facecolor="black", alpha=0.5, pad=1, boxstyle="round"))
+            title = (f"Warped ROI (F1)  {_disp.shape[1]}×{_disp.shape[0]}px"
+                     + (" ⚡" if warp_stretch > 1.5 else "")
                      + (" ⚠" if not trap_ok_flag else ""))
             ax.set_title(title, fontsize=9,
-                         color="orange" if not trap_ok_flag else "black")
+                         color="orange" if not trap_ok_flag else
+                         ("#e67e22" if warp_stretch > 1.5 else "black"))
         else:
             ax.set_facecolor("#f8e8e8")
             reason = results.get("invalid_reason", "n/a")
@@ -647,6 +659,13 @@ def create_full_pipeline_audit(image, results, save_path=None):
         lines_txt.append(f"── Fitted X pozíciók ────────")
         for fn, fx in sorted(pred_x.items()):
             lines_txt.append(f"  Fret {int(fn):2d} → {float(fx):.1f}px")
+        lines_txt.append(f"")
+        lines_txt.append(f"── Warp / Konfidencia ───────")
+        _lc_str = "⚠ ALACSONY" if low_confidence else "OK"
+        lines_txt.append(f"  low_conf : {_lc_str}")
+        lines_txt.append(f"  stretch  : {warp_stretch:.2f}×")
+        if warp_dyn_w is not None:
+            lines_txt.append(f"  dyn_w    : {warp_dyn_w}px  (std=600px)")
         lines_txt.append(f"")
         lines_txt.append(f"── Prototype Nut ────────────")
         if nut:

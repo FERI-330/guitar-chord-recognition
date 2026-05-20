@@ -1001,6 +1001,42 @@ def run_v14_pipeline(img_entry: dict,
     except Exception as exc:
         out["debug_info"]["fallback_roi_clamp"] = _make_debug_info("fallback_roi_clamp", exc)
 
+    # No-hand fallback: if detected lines cover less than 30% of image width (clustered
+    # near one end of the neck), extend the trapezoid corners horizontally along the
+    # neck direction so the warp captures more of the fretboard.
+    try:
+        _is_fallback_x = (out.get("debug_info", {}).get("hough", {}).get("fallback")
+                          == "global_hough_no_hand")
+        if _is_fallback_x and trap is not None:
+            _fx_lines = out.get("lines") or []
+            if len(_fx_lines) >= 2:
+                _all_xs = [x for (_x1, _y1, _x2, _y2) in _fx_lines for x in (_x1, _x2)]
+                _x_coverage = float(max(_all_xs) - min(_all_xs)) / img.shape[1]
+                if _x_coverage < 0.30:
+                    _neck_ang = float((out.get("neck") or {}).get("angle_deg", 0.0))
+                    _neck_vec = np.array([np.cos(np.radians(_neck_ang)),
+                                          np.sin(np.radians(_neck_ang))], dtype=np.float64)
+                    _ext_px = img.shape[1] * 0.30
+                    _cx = trap["corners_px"].astype(np.float64)
+                    _cx[0] -= _neck_vec * _ext_px   # TL → extend left
+                    _cx[3] -= _neck_vec * _ext_px   # BL → extend left
+                    _cx[1] += _neck_vec * _ext_px   # TR → extend right
+                    _cx[2] += _neck_vec * _ext_px   # BR → extend right
+                    _cx = np.clip(_cx, [0, 0], [img.shape[1] - 1, img.shape[0] - 1])
+                    trap = dict(trap)
+                    trap["corners_px"] = _cx.astype(np.float32)
+                    trap["w_start"] = float(np.linalg.norm(trap["corners_px"][1] - trap["corners_px"][0]))
+                    trap["w_end"] = float(np.linalg.norm(trap["corners_px"][2] - trap["corners_px"][3]))
+                    out["trap"] = trap
+                    out["debug_info"]["fallback_horiz_extend"] = {
+                        "x_coverage_before": _x_coverage, "extend_px": _ext_px,
+                        "neck_angle_deg": _neck_ang,
+                    }
+                    print(f"  [fallback_horiz_extend] x_coverage={_x_coverage:.2f}<0.30 "
+                          f"→ extend {_ext_px:.0f}px at neck_angle={_neck_ang:.1f}°")
+    except Exception as exc:
+        out["debug_info"]["fallback_horiz_extend"] = _make_debug_info("fallback_horiz_extend", exc)
+
     # ROI minimum height: if fretboard strip is thinner than 15% of the image height,
     # expand corners symmetrically outward along the perp direction.
     # Guard: when edge_info is None the fallback perp [0,1] is vertical — skip expansion
@@ -1166,6 +1202,38 @@ def run_v14_pipeline(img_entry: dict,
                 )
             except Exception:
                 pass
+
+    # Warp stretch detection: compute how much the warp stretched the source segment.
+    # When stretch > 1.5× the canonical width is much larger than the source,
+    # producing pixelated upscaling.  Create canon_natural (INTER_AREA downsample to
+    # the natural width) for display panels; out["canon"] stays at CANONICAL_W for ML.
+    try:
+        _c = trap["corners_px"].astype(np.float64)
+        _tl, _tr, _br, _bl = _c[0], _c[1], _c[2], _c[3]
+        _src_len = float((np.linalg.norm(_tr - _tl) + np.linalg.norm(_br - _bl)) / 2.0)
+        _src_hgt = float((np.linalg.norm(_bl - _tl) + np.linalg.norm(_br - _tr)) / 2.0)
+        _CANO_W = int(CFG["canonical_w"])
+        _CANO_H = int(CFG["canonical_h"])
+        _scale_h = _CANO_H / _src_hgt if _src_hgt > 1 else 1.0
+        _dyn_w = int(round(_src_len * _scale_h))
+        _dyn_w = max(min(_dyn_w, _CANO_W), _CANO_W // 4)
+        _stretch = _CANO_W / max(_dyn_w, 1)
+        out["warp_dyn_w"] = _dyn_w
+        out["warp_stretch_factor"] = _stretch
+        if _stretch > 1.5:
+            out["canon_natural"] = cv2.resize(
+                out["canon"], (_dyn_w, _CANO_H), interpolation=cv2.INTER_AREA
+            )
+        out["debug_info"]["warp_stretch"] = {
+            "src_len": _src_len, "src_hgt": _src_hgt,
+            "dyn_w": _dyn_w, "stretch_factor": _stretch,
+        }
+        if _stretch > 1.5:
+            print(f"  [warp_scale] stretch={_stretch:.1f}x  src_len={_src_len:.0f}px "
+                  f"→ dyn_w={_dyn_w}px (canonical={_CANO_W}px)  canon_natural stored")
+    except Exception as exc:
+        out["debug_info"]["warp_stretch"] = _make_debug_info("warp_stretch", exc)
+
     _detector = fret_detector if fret_detector is not None else _make_default_fret_detector()
     try:
         det_result = _detector.detect(out["canon"], shear=out.get("shear"), hand_mask=out.get("hand_mask"))
@@ -1220,6 +1288,21 @@ def run_v14_pipeline(img_entry: dict,
     out["is_flipped"] = is_flipped
     out["canon_norm"] = cv2.flip(out["canon"], 1) if is_flipped else out["canon"]
     out["nut_direction"] = "Nut-Right (flipped)" if is_flipped else "Nut-Left (standard)"
+
+    # Low-confidence flag: signals downstream (ML model, notebook) that this result
+    # may be noisy — either too few frets were matched, or the warp over-stretched
+    # a short source segment causing pixelation.
+    _cov = float(out.get("fit", {}).get("coverage_ratio", 0.0))
+    _stf = float(out.get("warp_stretch_factor", 1.0))
+    out["low_confidence"] = (
+        _cov < float(CFG.get("low_confidence_cov_thr", 0.20))
+        or _stf > float(CFG.get("low_confidence_stretch_thr", 2.0))
+    )
+    out["debug_info"]["confidence"] = {
+        "low_confidence": out["low_confidence"],
+        "coverage_ratio": _cov,
+        "warp_stretch_factor": _stf,
+    }
 
     out["ok"] = True
     return out
