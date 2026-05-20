@@ -2,6 +2,56 @@
 
 ---
 
+## 🗓️ 2026-05-21 – Bemutató kész: FileUpload integráció, notebook cleanup, 1280×720 standard bemenet
+
+### Rollback: visszaállás az 50d70c1 commitra
+
+A branch `prototype_v2` állapota visszaállt a **50d70c1** commithoz
+(`feat(augmentation): offline class balancing with 7-op augmentation pipeline`).
+
+**Indoklás:** A legutóbbi kísérleti módosítások (warp skálázás, No-Hand fallback iterációk)
+instabilitást okoztak a lokális GUI futtatásakor – a koordináta-számítások felbontásfüggővé
+váltak, ami a notebook interaktív session-öknél reprodukálhatatlan eredményeket adott.
+A 50d70c1 commit stabil, teljes pipeline futtatást biztosít (83.5% ok-ráta), ezért ez lett
+a bemutató-alap.
+
+### Új: FileUpload alapú tesztelési munkafolyamat
+
+A `10_interactive_orchestrator.ipynb` notebookba bekerült egy `ipywidgets.FileUpload`
+komponens. Az új workflow:
+
+1. Felhasználó feltölt egy tetszőleges gitárfotót a `Feltöltés` gombbal.
+2. A feltöltött bájtok → NumPy tömb → `cv2.imdecode` → BGR kép.
+3. **Kritikus lépés:** `cv2.resize(img, (1280, 720))` – standard méret alkalmazása.
+4. A kép ideiglenes fájlba kerül, majd `run_v14_pipeline` meghívódik rá.
+5. A temp fájl automatikusan törlődik a `finally` blokkban.
+
+Ez lehetővé teszi, hogy bármilyen saját képpel lehessen tesztelni a pipeline-t,
+a manifest által lefedett képeken túl is.
+
+### 1280×720 – standard bemenet döntés
+
+**Probléma (korábbi):** Az eltérő felbontású képek (pl. 3000×4000 px DSLR, 640×480 px webcam)
+különböző nut-szélességet, pixel-koordinátákat és trapézoid-méretet adtak → a CFG
+`nut_min_width_px` / `nut_max_width_px` paraméterek felbontás-függővé váltak.
+
+**Megoldás:** Egységes `1280×720` bemenet minden feltöltött képnél. Ez:
+- Stabil koordinátarendszert biztosít a pipeline számára.
+- Megfelel a manifesztből betöltött képek jellemző mérettartományának.
+- Elkerüli a felbontásból eredő detektálási hibákat.
+
+### Notebook: Presentation-ready állapot
+
+A `10_interactive_orchestrator.ipynb` notebook az alábbi cleanup után bemutató-kész:
+
+- **Eltávolított cellák:** `snr-comparison-header` + `sobel-vs-max-cell` (kísérleti profil-összehasonlító).
+- **Némított debug printek:** `Pipeline indítása...`, `logging.warning(...)`, szöveges pipeline-összefoglaló blokk.
+- **Duplikált import eltávolítva** (`from src.viz import ...` kétszer szerepelt).
+- **Kimenet:** Csak a központi Pipeline Audit / Master Dashboard vizualizáció jelenik meg.
+- **GUI layout:** `Feltöltés | Random | Képválasztó | Run Pipeline | …` – letisztult HBox elrendezés.
+
+---
+
 ## 🗓️ 2026-05-20 – Warp skálázás javítása: Megakadályozzuk a rövid trapézok túlzott vízszintes nyújtását a No-Hand módnál
 
 ### Motiváció
