@@ -1,9 +1,13 @@
+import os
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
 from scipy import signal
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_OUTPUT_DIR = _PROJECT_ROOT / "output"
 
 
 def _safe_gray(img_bgr):
@@ -101,6 +105,70 @@ def create_full_pipeline_audit(image, results, save_path=None):
         # fallback to full image
         roi = (0, 0, img_bgr.shape[1], img_bgr.shape[0])
 
+    # Canonical ROI image if available (used for mask/size alignment)
+    canon_img = results.get("canon")
+
+    # Helper: normalize mask to uint8 [0,255] and map/crop/resize into canonical ROI coords
+    def _prepare_mask(mask, roi_box, target_img=None):
+        if mask is None:
+            # return zeros shaped to target_img or roi size
+            if target_img is not None:
+                h, w = target_img.shape[:2]
+                return np.zeros((h, w), dtype=np.uint8)
+            else:
+                _, _, rw, rh = roi_box[0], roi_box[1], roi_box[2], roi_box[3]
+                return np.zeros((rw, rh), dtype=np.uint8)
+
+        mask = np.array(mask)
+        # Ensure mask numeric range is [0,255] uint8
+        try:
+            mmax = float(mask.max()) if mask.size > 0 else 0.0
+        except Exception:
+            mmax = 0.0
+        if mask.dtype != np.uint8:
+            if mmax <= 1.1:
+                mask = (mask.astype(np.float32) * 255.0).astype(np.uint8)
+            else:
+                mask = mask.astype(np.uint8)
+        else:
+            # uint8 but may be 0/1
+            if mmax <= 1:
+                mask = (mask.astype(np.uint8) * 255).astype(np.uint8)
+
+        x, y, w, h = roi_box
+        # If mask matches full image size, crop to roi
+        if mask.shape[:2] == gray.shape:
+            mask_roi = mask[y : y + h, x : x + w]
+        elif target_img is not None and mask.shape[:2] == target_img.shape[:2]:
+            mask_roi = mask
+        else:
+            # try to resize to roi size
+            try:
+                mask_roi = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            except Exception:
+                mask_roi = np.zeros((h, w), dtype=np.uint8)
+
+        # If canonical target exists and sizes differ, resize mask into canonical size
+        if target_img is not None:
+            th, tw = target_img.shape[:2]
+            if mask_roi.shape[:2] != (th, tw):
+                try:
+                    mask_roi = cv2.resize(mask_roi, (tw, th), interpolation=cv2.INTER_NEAREST)
+                except Exception:
+                    mask_roi = np.zeros((th, tw), dtype=np.uint8)
+
+        return mask_roi
+
+    # Prepare visualizable masks (in canonical ROI coords if possible)
+    hand_mask_vis = _prepare_mask(hand_mask, roi, target_img=canon_img)
+    neck_mask_vis = _prepare_mask(neck_mask, roi, target_img=canon_img)
+
+    # Debug: mask stats
+    try:
+        print(f"Mask stats: hand min={hand_mask_vis.min()}, max={hand_mask_vis.max()}, non-zero={np.count_nonzero(hand_mask_vis)}")
+    except Exception:
+        print("Mask stats: hand mask unavailable")
+
     # Hough lines
     lines = None
     try:
@@ -114,17 +182,32 @@ def create_full_pipeline_audit(image, results, save_path=None):
 
     # Intensity profile
     profile = results.get("intensity_profile")
+    # prefer profile from results; if missing or empty, compute from canonical ROI
     if profile is None:
-        # compute from canon if available as mean along axis 0
-        canon = results.get("canon")
-        if canon is not None:
-            g = _safe_gray(canon)
+        if canon_img is not None:
+            g = _safe_gray(canon_img)
             profile = g.mean(axis=0)
-            # normalize
             if profile.max() > 1e-6:
                 profile = profile / float(profile.max())
+            else:
+                # all zeros despite canon -> keep None
+                profile = None
         else:
             profile = None
+
+    # If profile exists but is all zeros or near-zero, recompute from raw canon (unmasked) as fallback
+    profile_note = None
+    try:
+        if profile is not None and np.max(profile) <= 1e-6:
+            if canon_img is not None:
+                g = _safe_gray(canon_img)
+                raw_profile = g.mean(axis=0)
+                if raw_profile.max() > 1e-6:
+                    profile = raw_profile / float(raw_profile.max())
+                    profile_note = "Raw (no mask)"
+                    print(f"[viz_diagnostics] Profile empty — recomputed from raw canonical ROI")
+    except Exception:
+        pass
 
     # Find peaks if profile exists
     peaks = []
@@ -169,14 +252,29 @@ def create_full_pipeline_audit(image, results, save_path=None):
     ax.axis("off")
 
     ax = axs[3]
-    ax.imshow(hand_mask, cmap="gray")
-    ax.set_title("Hand mask")
+    # Show mask in canonical ROI coords if available, otherwise raw mask
+    try:
+        if canon_img is not None and hand_mask_vis is not None:
+            ax.imshow(hand_mask_vis, cmap="gray")
+            ax.set_title("Hand mask (canonical ROI)")
+        else:
+            ax.imshow(hand_mask, cmap="gray")
+            ax.set_title("Hand mask")
+    except Exception:
+        ax.text(0.5, 0.5, "Mask unavailable", ha="center", va="center")
     ax.axis("off")
 
     # Row 2
     ax = axs[4]
-    ax.imshow(neck_mask, cmap="gray")
-    ax.set_title("Neck mask")
+    try:
+        if canon_img is not None and neck_mask_vis is not None:
+            ax.imshow(neck_mask_vis, cmap="gray")
+            ax.set_title("Neck mask (canonical ROI)")
+        else:
+            ax.imshow(neck_mask, cmap="gray")
+            ax.set_title("Neck mask")
+    except Exception:
+        ax.text(0.5, 0.5, "Mask unavailable", ha="center", va="center")
     ax.axis("off")
 
     ax = axs[5]
@@ -217,6 +315,12 @@ def create_full_pipeline_audit(image, results, save_path=None):
         xs = np.arange(len(profile))
         ax.plot(xs, profile, color="steelblue")
         ax.fill_between(xs, profile, alpha=0.15)
+        # Ensure axis rescales to shown data
+        try:
+            ax.relim()
+            ax.autoscale_view()
+        except Exception:
+            pass
         # plot peaks
         if len(peaks) > 0:
             ax.scatter(peaks, profile[peaks], c="gray", s=20, label="peaks")
@@ -238,6 +342,16 @@ def create_full_pipeline_audit(image, results, save_path=None):
             ax.axhline(min(1.0, pmean), color="#888", ls=":", lw=0.9, label="mean-prom")
     else:
         ax.text(0.5, 0.5, "No profile available", ha="center", va="center")
+    # Debug: profile stats
+    try:
+        if profile is None:
+            print("Profile stats: None")
+        else:
+            print(f"Profile stats: len={len(profile)}, max={np.max(profile)}")
+            if profile_note is not None:
+                ax.text(0.02, 0.95, profile_note, transform=ax.transAxes, fontsize=8, color="#c0392b")
+    except Exception:
+        pass
     ax.set_title("Intensity profile & decisions")
 
     ax = axs[9]
@@ -316,12 +430,15 @@ def create_full_pipeline_audit(image, results, save_path=None):
 
     if save_path is not None:
         output_path = Path(save_path)
+        if not output_path.is_absolute():
+            output_path = _PROJECT_ROOT / output_path
         if output_path.suffix == "":
             image_name = Path(results.get("fname", "diagnostic")).stem or "diagnostic"
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = output_path / f"{image_name}_{timestamp}_diag.png"
+            timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+            output_path = output_path / f"diag_{timestamp}_{image_name}.png"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, dpi=200, bbox_inches="tight")
+        print(f"Mentés helye: {os.path.abspath(output_path)}")
 
     # Fail-soft red frame
     if not results.get('ok'):
