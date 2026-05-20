@@ -428,9 +428,10 @@ class PipelineVisualizer:
         # ── 2. Bund vonalak visszavetítve a kanonikus térből ───────────────
         H_inv = points.get("H_inv")
         fit = points.get("fit")
-        if H_inv is not None and fit is not None:
-            pred_x: dict = fit.get("predicted_x", {})
+        pred_x: dict = fit.get("predicted_x", {}) if fit is not None else {}
+        if H_inv is not None:
             fret_thickness = self._resolve_line_thickness(vis)
+            # Elsődleges forrás: 17.817 szabály illesztett pozíciók
             for fret_n, fx in pred_x.items():
                 fx = float(fx)
                 # Back-project two canonical points (top and bottom) using perspectiveTransform
@@ -461,6 +462,22 @@ class PipelineVisualizer:
                         cv2.FONT_HERSHEY_SIMPLEX, self.font_scale,
                         self.fret_color, 1, cv2.LINE_AA,
                     )
+            # Fallback: ha predicted_x üres, nyers filt. detekciók visszavetítése
+            if not pred_x:
+                for fx in (points.get("fret_xs_filt") or []):
+                    try:
+                        canon_pts = np.array([[[float(fx), 0.0]], [[float(fx), float(CANONICAL_H)]]], dtype=np.float32)
+                        proj = cv2.perspectiveTransform(canon_pts, H_inv)
+                        tx = int(round(float(proj[0, 0, 0]))); ty = int(round(float(proj[0, 0, 1])))
+                        bx = int(round(float(proj[1, 0, 0]))); by = int(round(float(proj[1, 0, 1])))
+                        self._draw_outlined_line(
+                            vis, (tx, ty), (bx, by),
+                            color=self.fret_color,
+                            thickness=fret_thickness,
+                            outline_thickness=fret_thickness + 2,
+                        )
+                    except Exception:
+                        continue
 
         # ── 3. Nut oldal jelzése ───────────────────────────────────────────
         nut_side = direction or points.get("nut_side_hint")
@@ -1390,16 +1407,24 @@ def draw_master_dashboard(
     if canon is not None:
         vis_canon = canon.copy()
         ch = canon.shape[0]
+        # Nyers filt. detekciók halvány kékkel
         for fx in fret_xs:
             xi = int(round(float(fx)))
-            _cv2.line(vis_canon, (xi, 0), (xi, ch), (80, 80, 240), 1, _cv2.LINE_AA)
+            _cv2.line(vis_canon, (xi, 0), (xi, ch), (120, 80, 80), 1, _cv2.LINE_AA)
+        # Illesztett bund-pozíciók (17.817 szabály) zölddel – ezek az "official" pozíciók
+        _fit_for_canon = result.get("fit") or {}
+        _pred_x = _fit_for_canon.get("predicted_x") or {}
+        for _, pfx in _pred_x.items():
+            xi = int(round(float(pfx)))
+            _cv2.line(vis_canon, (xi, 0), (xi, ch), (50, 220, 50), 1, _cv2.LINE_AA)
         if nut is not None:
             nx = int(round(float(nut["nut_x"])))
             _cv2.line(vis_canon, (nx, 0), (nx, ch), (0, 220, 100), 2, _cv2.LINE_AA)
         ax3.imshow(vis_canon[:, :, ::-1], aspect="auto", interpolation="bilinear")
         nut_str = f"@{int(nut['nut_x'])}px" if nut else "n/a"
+        n_fitted = len(_pred_x)
         ax3.set_title(
-            f"Kiegyenesített ROI (600×80 px)  nut={nut_str}  frets={len(fret_xs)}",
+            f"Kiegyenesített ROI  nut={nut_str}  fitted={n_fitted}  raw={len(fret_xs)}",
             fontsize=viz._font_size(8.5, scale, minimum=7),
         )
     else:

@@ -469,14 +469,20 @@ def create_full_pipeline_audit(image, results, save_path=None):
     def _draw_canon():
         canon = results.get("canon") or img_bgr
         ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
-        frets = results.get("fret_xs_filt") or []
-        for fx in frets:
-            ax.axvline(fx, color="#e74c3c", lw=1.0)
+        # Nyers szűrt detekciók – halvány referencia
+        for fx in (results.get("fret_xs_filt") or []):
+            ax.axvline(fx, color="#888888", lw=0.6, alpha=0.5)
+        # Illesztett pozíciók (17.817 szabály) – zöld, ezek a "valós" bund-helyek
+        _fit_d = results.get("fit") or {}
+        _pred = _fit_d.get("predicted_x") or {}
+        for _, pfx in _pred.items():
+            ax.axvline(pfx, color="#2ecc71", lw=1.0)
         # Prototype nut – szaggatott sárga vonal (csak vizualizáció, nem kritikus út)
         proto_nut_x = nut.get("nut_x") if nut else None
         if proto_nut_x is not None:
             ax.axvline(proto_nut_x, color="yellow", lw=1.5, ls="--", label="nut (proto)")
-        ax.set_title("Canonical ROI + frets")
+        n_fitted = len(_pred)
+        ax.set_title(f"Canonical ROI + frets ({n_fitted} fitted)")
 
     _safe_draw(ax, _draw_canon, fallback_msg="Canonical ROI unavailable")
 
