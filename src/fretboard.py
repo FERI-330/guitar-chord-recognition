@@ -26,17 +26,17 @@ from src.geometry import (
     step1_canny, step2_hough, step3_neck_angle, step3b_refine_neck_angle,
     step4_split_lines,
     step5_outer_edges, step6_clamp_trapezoid_extent, step6_trapezoid, step6_warp,
-    step6b_find_nut, step6c_trim_to_nut, step6_extend_for_nut,
     step6d_shear_correction,
     step7_fret_lines_canonical, step8_fit_fret_rule,
     detect_guitar_orientation,
 )
+# step6b_find_nut / step6c_trim_to_nut / step6_extend_for_nut → prototype_nut_detector.py
 from src.hand_landmark import (
     get_landmarker,
     step9_detect_landmarks, step9_project_fingertips,
     build_finger_mask, anchor_neck_angle, step3_neck_angle_anchored,
-    get_fretboard_near_edge,
 )
+# get_fretboard_near_edge → prototype_nut_detector.py (only needed for nut boundary search)
 
 # Modul-szintű lazy singleton a landmarker-hez
 _landmarker = None
@@ -70,24 +70,6 @@ def _make_debug_info(stage: str, exc: Exception | str, **extra) -> dict:
         if value is not None:
             info[key] = value
     return info
-
-
-def _make_safety_nut(canon_bgr: np.ndarray,
-                     side_hint: Optional[str] = None,
-                     margin_px: int = 4) -> dict:
-    """Fallback nut anchor near the ROI edge so fret fitting can still run."""
-    width = int(canon_bgr.shape[1]) if canon_bgr is not None else int(CFG["canonical_w"])
-    side = side_hint if side_hint in ("left", "right") else "left"
-    nut_x = margin_px if side == "left" else max(0, width - 1 - margin_px)
-    return {
-        "side": side,
-        "nut_x": float(nut_x),
-        "peak": 0.0,
-        "ratio": 0.0,
-        "width_px": 0.0,
-        "col_response": None,
-        "safety": True,
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,24 +351,16 @@ class GeometricFretDetector(FretDetectorInterface):
             fret_xs_raw = step7_fret_lines_canonical(canon_bgr)
             fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
 
-            nut_side = nut["side"] if nut else None
             refine_enabled = bool(CFG.get("fret_refine_enabled", True))
             refine_tol = float(CFG.get("fret_refine_tol_px", 12.0))
 
-            fit_pass1 = step8_fit_fret_rule(
-                fret_xs_filt,
-                nut_anchored=(nut_side is not None),
-                nut_side=nut_side,
-            )
+            # Nut-anchor eltávolítva a kritikus útból – lebegő bund-hálózat
+            fit_pass1 = step8_fit_fret_rule(fret_xs_filt, nut_anchored=False)
             if refine_enabled and len(fret_xs_filt) >= 3:
                 refined_frets = refine_frets_by_fit(fret_xs_filt, fit_pass1, refine_tol)
                 if refined_frets:
                     fret_xs_filt = refined_frets
-                fit = step8_fit_fret_rule(
-                    fret_xs_filt,
-                    nut_anchored=(nut_side is not None),
-                    nut_side=nut_side,
-                )
+                fit = step8_fit_fret_rule(fret_xs_filt, nut_anchored=False)
             else:
                 fit = fit_pass1
         except Exception as exc:
@@ -930,45 +904,8 @@ def run_v14_pipeline(img_entry: dict,
         out["debug_info"]["nut_side_hint"] = _make_debug_info("nut_side_hint", exc)
     out["nut_side_hint"] = side_hint
 
-    hand_bnd_x: Optional[float] = None
-    try:
-        near_edge = get_fretboard_near_edge(landmarks, img.shape)
-        if near_edge is not None:
-            hand_bnd_x = _project_landmark_to_canon(near_edge, H)
-    except Exception as exc:
-        out["debug_info"]["hand_boundary"] = _make_debug_info("hand_boundary", exc)
-    out["hand_boundary_canon_x"] = hand_bnd_x
-
-    try:
-        nut = step6b_find_nut(canon, side_hint=side_hint, hand_boundary_canon_x=hand_bnd_x)
-    except Exception as exc:
-        nut = None
-        out["debug_info"]["nut"] = _make_debug_info("nut", exc)
-    out["nut"] = nut
-
-    if nut is None:
-        nut = _make_safety_nut(canon, side_hint=side_hint)
-        nut["reason"] = "fallback_safety_nut"
-        out["nut"] = nut
-        out["nut_is_safety"] = True
-        out["debug_info"]["nut_fallback"] = _make_debug_info("nut_fallback", "safety_nut")
-    else:
-        out["nut_is_safety"] = bool(nut.get("safety", False))
-
-    if out.get("trap") is not None and H_inv is not None:
-        try:
-            corners_trim = step6c_trim_to_nut(trap["corners_px"], H_inv, nut)
-            H2, H2_inv, canon2 = step6_warp(img, corners_trim)
-            out["corners_trim"] = corners_trim
-            out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
-            # Hand mask újra-vetítése az aktualizált homográfiával
-            fm = out.get("finger_mask")
-            if fm is not None:
-                Wc = int(CFG["canonical_w"])
-                Hc = int(CFG["canonical_h"])
-                out["hand_mask"] = cv2.warpPerspective(fm, H2, (Wc, Hc), flags=cv2.INTER_NEAREST)
-        except Exception as exc:
-            out["debug_info"]["trim_to_nut"] = _make_debug_info("trim_to_nut", exc)
+    # Nut detekció ki van vezetve a kritikus útból → prototype_nut_detector.py kezeli (csak vizualizációhoz)
+    out["nut"] = None
 
     out["canon_pre_shear"] = out.get("canon")
     try:
@@ -1003,26 +940,14 @@ def run_v14_pipeline(img_entry: dict,
                 )
             except Exception:
                 pass
-        try:
-            nut_post = step6b_find_nut(
-                out["canon"],
-                side_hint=out.get("nut_side_hint"),
-                hand_boundary_canon_x=out.get("hand_boundary_canon_x"),
-            )
-            if nut_post is not None:
-                out["nut"] = nut_post
-                out["nut_is_safety"] = bool(nut_post.get("safety", False))
-        except Exception as exc:
-            out["debug_info"]["nut_post_shear"] = _make_debug_info("nut_post_shear", exc)
-
     _detector = fret_detector if fret_detector is not None else _make_default_fret_detector()
     try:
-        det_result = _detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"), hand_mask=out.get("hand_mask"))
+        det_result = _detector.detect(out["canon"], shear=out.get("shear"), hand_mask=out.get("hand_mask"))
     except Exception as exc:
         out["debug_info"]["fret_detector"] = _make_debug_info("fret_detector", exc, detector=type(_detector).__name__)
         fallback_detector = GeometricFretDetector() if not isinstance(_detector, GeometricFretDetector) else IntensityFretDetector(mode="max")
         try:
-            det_result = fallback_detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"), hand_mask=out.get("hand_mask"))
+            det_result = fallback_detector.detect(out["canon"], shear=out.get("shear"), hand_mask=out.get("hand_mask"))
             out["debug_info"]["fret_detector_fallback"] = type(fallback_detector).__name__
         except Exception as exc2:
             out["fit"] = _make_empty_fit()
