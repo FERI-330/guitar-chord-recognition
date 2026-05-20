@@ -6,6 +6,61 @@
 
 ---
 
+## 🗓️ 2026-05-20 – Diagnosztikai panel frissítése: 16 fázisú pipeline vizualizáció bevezetése
+
+### Probléma
+
+Az F1–F2 refaktor után a diagnosztikai audit panel (`create_full_pipeline_audit`) elavult volt:
+- A subplot-sorrend nem követte a pipeline lépéseit.
+- A Nut-mentesített pipeline után hiányos adatforrásokat használt (`hand_boundary_canon_x`, `corners_trim`).
+- Hiányzott az `IntensityFretDetector` kimenetének dedikált vizualizációja.
+- A kanonikus ROI-n pirossal rajzolt `fret_xs_filt` nem tette vizuálisan elkülöníthetővé a nyers és illesztett bund-pozíciókat.
+
+### Elvégzett változtatások
+
+**`src/viz_diagnostics.py`** — teljes újraírás, 16 fázisú layout:
+
+**1. sor – Előkészítés:**
+- `axs[0]` Original + MediaPipe Landmarks (csontváz-kapcsolatok + ujjhegyek piros ponttal)
+- `axs[1]` Finger Mask (original space) – kép fölé tintázva, non-zero pixel százalék
+- `axs[2]` Initial Trapézoid – sarokpontok saját színnel, `trap_ok` státusz
+- `axs[3]` Warped ROI (kézzel) – F1 változtatás: a nyers (maszkolt) képből warpolt ROI
+
+**2. sor – Geometria (F1):**
+- `axs[4]` Hand Mask canonical – kép fölé tintázva (lila); üres maszk esetén piros figyelmeztetés
+- `axs[5]` Pre-shear canonical ROI (ha `canon_pre_shear` elérhető)
+- `axs[6]` Post-shear canonical ROI, shear-szög + `corrected` jelzővel
+- `axs[7]` Hough vonalak szög-alapú színnel, `angle_deg` + `long_lines`/`fret_lines` számok
+
+**3. sor – Detekció (F2):**
+- `axs[8]` Sobel-X gradiens kép a kanonikus ROI-ból (inferno colormap)
+- `axs[9]` Masked Intensity Profile: nyers `fret_xs_raw` (narancs) + illesztett `predicted_x` (zöld) + peaks (piros)
+- `axs[10]` Prototype Nut (szaggatott sárga vonal) – `detect_nut_prototype` hívja, `safety` jelzővel
+- `axs[11]` Detection Debug: fit method/coverage/inliers, peak prominences/widths, shear, detektor-mód
+
+**4. sor – Eredmény:**
+- `axs[12]` Final Overlay – `PipelineVisualizer.draw_fretboard_overlay` + `draw_landmarks`
+- `axs[13]` Canonical ROI + fitted frets (zöld `predicted_x`) + dim szürke `fret_xs_filt` + sárga nut
+- `axs[14]` Fingertips kanonikus térben (ujjankénti szín + fret_est annotáció)
+- `axs[15]` Pipeline Summary szöveg: státusz, coverage, frett-koordináta táblázat, proto nut
+
+**Figsize**: `(26, 20)` — korábbi `(24, 18)` helyett, jobb olvashatóságért.
+
+**`notebooks/10_interactive_orchestrator.ipynb`**
+
+- **Widget bootstrap (cell 6):** `w_raw_dump = Checkbox(description='Raw Data Dump')` hozzáadva.
+- **GUI panel (cell 7):** `w_raw_dump` checkbox bekerült a `run_row`-ba.
+- **Pipeline callback (cell 4):** Ha `w_raw_dump` be van kapcsolva, a futtatás végén szöveges dump jelenik meg:
+  `fret_xs_raw`, `fret_xs_filt`, `predicted_x`, `fingertips` (tip index, canon_x/y, fret_est), `coverage_ratio`, `H_inv` jelenlét.
+
+### Architektúra-invariancia
+
+- Az összes subplot `_safe_draw` burkolóval védett — részleges pipeline eredmény esetén is korrekt fallback szöveg jelenik meg.
+- A `detect_nut_prototype` hívás `try/except`-tel védett; ha a modul nem érhető el, a nut szubplotter `None`-ra esik vissza.
+- A `PipelineVisualizer` importja a `_draw_final_overlay` closure-ban van (`from src.viz import ...`) — nem okoz körkörös importot.
+
+---
+
 ## 🗓️ 2026-05-20 – Vizualizáció szinkronizálása a Nut-mentesített pipeline-hoz
 
 ### Probléma
