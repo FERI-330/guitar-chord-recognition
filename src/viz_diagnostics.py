@@ -1,3 +1,13 @@
+"""
+src/viz_diagnostics.py
+
+16-panel pipeline audit vizualizáció, pipeline-sorrendben.
+
+Sor 1 – Előkészítés   : Original + Landmarks | Finger Mask | Trapézoid | Warped ROI (kézzel)
+Sor 2 – Geometria (F1): Hand Mask canonical  | Pre-shear ROI | Post-shear ROI | Hough + nyak
+Sor 3 – Detekció (F2) : Sobel-X canonical    | Masked Profile + Peaks | Proto Nut | Debug info
+Sor 4 – Eredmény      : Final overlay         | Canonical + frets | Fingertips | Összefoglaló
+"""
 import os
 import cv2
 import numpy as np
@@ -14,6 +24,7 @@ except Exception:
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _OUTPUT_DIR = _PROJECT_ROOT / "output"
 
+# ── Segédfüggvények ───────────────────────────────────────────────────────────
 
 def _safe_gray(img_bgr):
     if img_bgr is None:
@@ -21,6 +32,11 @@ def _safe_gray(img_bgr):
     if len(img_bgr.shape) == 2:
         return img_bgr.astype(np.uint8)
     return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+
+def _angle_color(angle_deg):
+    a = np.clip((angle_deg + 90.0) / 180.0, 0.0, 1.0)
+    return plt.get_cmap("RdYlBu")(a)
 
 
 def _draw_bbox(ax, bbox, color=(0, 1, 0), lw=1.0):
@@ -31,263 +47,59 @@ def _draw_bbox(ax, bbox, color=(0, 1, 0), lw=1.0):
     ax.add_patch(rect)
 
 
-def _angle_color(angle_deg):
-    # Map -90..90 to a color map (blue->red)
-    a = (angle_deg + 90.0) / 180.0
-    a = np.clip(a, 0.0, 1.0)
-    cmap = plt.get_cmap("RdYlBu")
-    return cmap(a)
+def _overlay_mask(img_rgb, mask, color_rgb=(255, 80, 80), alpha=0.45):
+    """Tint img_rgb where mask>0."""
+    out = img_rgb.copy().astype(np.float32)
+    tint = np.zeros_like(out)
+    for c, v in enumerate(color_rgb):
+        tint[:, :, c] = v
+    m = (mask > 0).astype(np.float32)[:, :, np.newaxis]
+    return np.clip(out * (1 - alpha * m) + tint * alpha * m, 0, 255).astype(np.uint8)
 
+
+# ── Fő függvény ───────────────────────────────────────────────────────────────
 
 def create_full_pipeline_audit(image, results, save_path=None):
-    """Create a comprehensive 4x4 diagnostics figure.
+    """16-panel pipeline audit a run_v14_pipeline() kimeneteből.
 
-    Parameters
-    - image: BGR image (numpy) or None
-    - results: dict returned by the pipeline (may be partially populated)
+    Paraméterek:
+        image:     BGR kép (numpy) vagy None  — ha None, results["img"]-ből jön
+        results:   run_v14_pipeline() visszatérési értéke
+        save_path: PNG mentési útvonal (opcionális)
 
-    The function is defensive: it will use whatever is available in `results`.
+    Visszaad: matplotlib Figure
     """
-    # Prepare inputs
-    img_bgr = None
-    if image is not None:
-        img_bgr = image.copy()
-    else:
-        img_bgr = results.get("img")
-        if img_bgr is None:
-            img_bgr = results.get("canon")
-
+    # ── Bemeneti adatok előkészítése ──────────────────────────────────────────
+    img_bgr = (image.copy() if image is not None
+               else results.get("img") or results.get("canon"))
     if img_bgr is None:
-        # Nothing to draw
         fig = plt.figure(figsize=(12, 9))
-        plt.text(0.5, 0.5, "No image available for diagnostics", ha="center", va="center")
+        plt.text(0.5, 0.5, "No image available for diagnostics",
+                 ha="center", va="center", fontsize=14)
         return fig
 
-    gray = _safe_gray(img_bgr)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-    # Compute CLAHE
-    try:
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        clahe_img = clahe.apply(gray)
-    except Exception:
-        clahe_img = gray
+    landmarks   = results.get("landmarks")
+    finger_mask = results.get("finger_mask")   # original-space finger mask
+    hand_mask   = results.get("hand_mask")     # canonical-space hand mask (F1)
+    trap        = results.get("trap")
+    H_inv       = results.get("H_inv")
+    canon       = results.get("canon")
+    canon_pre   = results.get("canon_pre_shear")
+    shear       = results.get("shear") or {}
+    lines_raw   = results.get("lines") or []
+    neck        = results.get("neck") or {}
+    profile     = results.get("intensity_profile")
+    fret_xs_raw = results.get("fret_xs_raw") or []
+    fret_xs_filt = results.get("fret_xs_filt") or []
+    fit         = results.get("fit") or {}
+    pred_x      = fit.get("predicted_x") or {}
+    fingertips  = results.get("fingertips") or []
+    ok          = bool(results.get("ok", False))
+    cov         = float(fit.get("coverage_ratio", 0.0))
 
-    # Masks: try to get from results, otherwise create simple hand mask from landmarks
-    hand_mask = results.get("hand_mask")
-    neck_mask = results.get("neck_mask")
-    landmarks = results.get("landmarks")
-    if hand_mask is None and landmarks is not None:
-        # landmarks expected as list of (x,y) points
-        try:
-            pts = np.array(landmarks, dtype=np.int32)
-            hand_mask = np.zeros(gray.shape, dtype=np.uint8)
-            cv2.fillConvexPoly(hand_mask, pts, 255)
-        except Exception:
-            hand_mask = np.zeros(gray.shape, dtype=np.uint8)
-    if neck_mask is None:
-        # crude neck mask: area around median horizontal band where frets likely are
-        h = gray.shape[0]
-        neck_mask = np.zeros_like(gray)
-        y1 = int(h * 0.25)
-        y2 = int(h * 0.65)
-        neck_mask[y1:y2, :] = 255
-
-    # Edge detections
-    edges_canny = cv2.Canny(gray, 50, 150)
-    sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    sobelx_abs = np.uint8(np.clip(np.abs(sobelx) / (sobelx.max() + 1e-6) * 255, 0, 255))
-
-    # ROI bounding box: try results.get('roi') or compute from landmarks or neck_mask
-    roi = results.get("roi")
-    if roi is None and landmarks is not None:
-        try:
-            pts = np.array(landmarks, dtype=np.int32)
-            x, y, w, h = cv2.boundingRect(pts)
-            roi = (x, y, w, h)
-        except Exception:
-            roi = None
-    if roi is None:
-        # fallback to full image
-        roi = (0, 0, img_bgr.shape[1], img_bgr.shape[0])
-
-    x, y, w, h = roi
-    roi_gray = gray[max(0, y):max(0, y + h), max(0, x):max(0, x + w)]
-    if roi_gray.size == 0:
-        roi_gray = gray
-
-    # Canonical ROI image if available (used for mask/size alignment)
-    canon_img = results.get("canon")
-
-    # Helper: normalize mask to uint8 [0,255] and map/crop/resize into canonical ROI coords
-    def _prepare_mask(mask, roi_box, target_img=None):
-        if mask is None:
-            # return zeros shaped to target_img or roi size
-            if target_img is not None:
-                h, w = target_img.shape[:2]
-                return np.zeros((h, w), dtype=np.uint8)
-            else:
-                _, _, rw, rh = roi_box[0], roi_box[1], roi_box[2], roi_box[3]
-                return np.zeros((rw, rh), dtype=np.uint8)
-
-        mask = np.array(mask)
-        # Ensure mask numeric range is [0,255] uint8
-        try:
-            mmax = float(mask.max()) if mask.size > 0 else 0.0
-        except Exception:
-            mmax = 0.0
-        if mask.dtype == np.bool_:
-            mask = (mask.astype(np.uint8) * 255).astype(np.uint8)
-            mmax = float(mask.max()) if mask.size > 0 else 0.0
-        elif np.issubdtype(mask.dtype, np.integer) and mmax <= 1.1:
-            mask = (mask.astype(np.uint8) * 255).astype(np.uint8)
-            mmax = float(mask.max()) if mask.size > 0 else 0.0
-        if mask.dtype != np.uint8:
-            if mmax <= 1.1:
-                mask = (mask.astype(np.float32) * 255.0).astype(np.uint8)
-            else:
-                mask = mask.astype(np.uint8)
-        else:
-            # uint8 but may be 0/1
-            if mmax <= 1:
-                mask = (mask.astype(np.uint8) * 255).astype(np.uint8)
-
-        x, y, w, h = roi_box
-        # If mask matches full image size, crop to roi
-        if mask.shape[:2] == gray.shape:
-            mask_roi = mask[y : y + h, x : x + w]
-        elif target_img is not None and mask.shape[:2] == target_img.shape[:2]:
-            mask_roi = mask
-        else:
-            # try to resize to roi size
-            try:
-                mask_roi = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-            except Exception:
-                mask_roi = np.zeros((h, w), dtype=np.uint8)
-
-        # If canonical target exists and sizes differ, resize mask into canonical size
-        if target_img is not None:
-            th, tw = target_img.shape[:2]
-            if mask_roi.shape[:2] != (th, tw):
-                try:
-                    mask_roi = cv2.resize(mask_roi, (tw, th), interpolation=cv2.INTER_NEAREST)
-                except Exception:
-                    mask_roi = np.zeros((th, tw), dtype=np.uint8)
-
-        return mask_roi
-
-    def _raw_profile_from_img(target_img):
-        if target_img is None:
-            return None
-        try:
-            raw_gray = _safe_gray(target_img)
-            if raw_gray is None:
-                return None
-            raw_profile = raw_gray.mean(axis=0).astype(np.float32)
-            if raw_profile.size == 0:
-                return None
-            raw_profile = np.nan_to_num(raw_profile, nan=0.0, posinf=0.0, neginf=0.0)
-            raw_max = float(raw_profile.max())
-            if raw_max > 1e-6:
-                raw_profile = raw_profile / raw_max
-            return raw_profile
-        except Exception:
-            return None
-
-    # Prepare visualizable masks (in canonical ROI coords if possible)
-    hand_mask_vis = _prepare_mask(hand_mask, roi, target_img=canon_img)
-    neck_mask_vis = _prepare_mask(neck_mask, roi, target_img=canon_img)
-    hand_mask_empty = False
-    try:
-        hand_mask_empty = np.count_nonzero(hand_mask_vis) == 0
-    except Exception:
-        hand_mask_empty = False
-
-    # Debug: mask stats
-    try:
-        print(f"Mask stats: hand min={hand_mask_vis.min()}, max={hand_mask_vis.max()}, non-zero={np.count_nonzero(hand_mask_vis)}")
-        print(f"DEBUG: Hand mask sum: {np.sum(hand_mask_vis)}")
-    except Exception:
-        print("Mask stats: hand mask unavailable")
-
-    # Hough lines
-    lines = None
-    try:
-        # use sobel or canny for Hough
-        lines = cv2.HoughLinesP(edges_canny, 1, np.pi / 180.0, threshold=80, minLineLength=50, maxLineGap=10)
-    except Exception:
-        lines = None
-
-    # Shear info
-    shear = results.get("shear") or {}
-
-    # Intensity profile
-    profile = results.get("profile")
-    if profile is None:
-        profile = results.get("intensity_profile")
-    profile_raw = results.get("profile_raw")
-    if profile_raw is None:
-        profile_raw = results.get("raw_profile")
-    if profile_raw is None:
-        profile_raw = _raw_profile_from_img(canon_img if canon_img is not None else img_bgr)
-    # prefer profile from results; if missing or empty, compute from canonical ROI
-    if profile is None:
-        if canon_img is not None:
-            g = _safe_gray(canon_img)
-            profile = g.mean(axis=0)
-            if profile.max() > 1e-6:
-                profile = profile / float(profile.max())
-            else:
-                # all zeros despite canon -> keep None
-                profile = None
-        else:
-            profile = None
-
-    # If profile exists but is all zeros or near-zero, recompute from raw canon (unmasked) as fallback
-    profile_note = None
-    try:
-        if profile is not None and np.max(profile) <= 1e-6:
-            if canon_img is not None:
-                g = _safe_gray(canon_img)
-                raw_profile = g.mean(axis=0)
-                if raw_profile.max() > 1e-6:
-                    profile = raw_profile / float(raw_profile.max())
-                    profile_note = "Raw (no mask)"
-                    print(f"[viz_diagnostics] Profile empty — recomputed from raw canonical ROI")
-    except Exception:
-        pass
-
-    # Debug: ROI mean intensity
-    try:
-        print(f"DEBUG: ROI mean intensity: {float(np.mean(roi_gray))}")
-    except Exception:
-        print("DEBUG: ROI mean intensity: None")
-
-    # Clean up profile arrays for plotting
-    def _clean_profile(arr):
-        if arr is None:
-            return None
-        arr = np.asarray(arr, dtype=np.float32).reshape(-1)
-        if arr.size == 0:
-            return None
-        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-        return arr
-
-    profile = _clean_profile(profile)
-    profile_raw = _clean_profile(profile_raw)
-    if profile_raw is None and profile is not None:
-        profile_raw = profile.copy()
-
-    # Find peaks if profile exists
-    peaks = []
-    peak_props = {}
-    if profile is not None:
-        try:
-            peaks, props = signal.find_peaks(profile, prominence=0.05, width=1)
-            peak_props = props
-        except Exception:
-            peaks = []
-
-    # Nut info – kritikus útból eltávolítva; prototype detector adja vizualizációhoz
+    # Prototype nut – csak vizualizációhoz
     _proto_nut = None
     if _detect_nut_proto is not None:
         try:
@@ -296,12 +108,52 @@ def create_full_pipeline_audit(image, results, save_path=None):
             pass
     nut = _proto_nut or {}
 
-    # Fingertips / touch points
-    touch_points = results.get("touch_points") or []
+    # Intenzitás profil fallback
+    if profile is None and canon is not None:
+        g = _safe_gray(canon)
+        if g is not None:
+            p = g.mean(axis=0).astype(np.float32)
+            mx = float(p.max())
+            profile = p / mx if mx > 1e-6 else None
 
-    # Final plotting: 4x4 grid
-    fig, axs = plt.subplots(4, 4, figsize=(24, 18), constrained_layout=True)
+    def _clean_profile(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return None
+        return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+    profile = _clean_profile(profile)
+
+    peaks, peak_props = [], {}
+    if profile is not None:
+        try:
+            peaks, peak_props = signal.find_peaks(profile, prominence=0.05, width=1)
+        except Exception:
+            pass
+
+    # Debug prints
+    try:
+        hm = hand_mask
+        print(f"[audit] hand_mask: {hm.shape if hm is not None else None}  "
+              f"non-zero={np.count_nonzero(hm) if hm is not None else 0}")
+        print(f"[audit] profile: {'ok' if profile is not None else 'None'}  "
+              f"peaks={len(peaks)}  frets_filt={len(fret_xs_filt)}  predicted={len(pred_x)}")
+    except Exception:
+        pass
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    fig, axs = plt.subplots(4, 4, figsize=(26, 20), constrained_layout=True)
     axs = axs.reshape(-1)
+
+    ok_color = "#2ecc71" if ok else "#e74c3c"
+    fig.suptitle(
+        f"Pipeline Audit  |  {results.get('fname', results.get('class', '?'))}  |  "
+        f"{'✓ OK' if ok else '✗ ' + str(results.get('invalid_reason', ''))}  |  "
+        f"cov={cov:.3f}  fitted={len(pred_x)}  raw={len(fret_xs_filt)}",
+        fontsize=12, fontweight="bold", color=ok_color,
+    )
 
     def _safe_draw(ax, draw_fn, fallback_msg="Unavailable", show_axis=False):
         try:
@@ -310,241 +162,447 @@ def create_full_pipeline_audit(image, results, save_path=None):
         except Exception as e:
             ax.cla()
             try:
-                ax.text(0.5, 0.5, f"{fallback_msg}: {type(e).__name__}: {e}", ha="center", va="center")
+                ax.text(0.5, 0.5, f"{fallback_msg}\n{type(e).__name__}: {e}",
+                        ha="center", va="center", fontsize=7,
+                        color="red", transform=ax.transAxes, wrap=True)
             except Exception:
                 pass
         finally:
             if not show_axis:
                 ax.axis("off")
 
-    # Row 1
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SOR 1 – ELŐKÉSZÍTÉS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # [0] Original kép + MediaPipe Landmarks
     ax = axs[0]
-    def _draw_raw():
-        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        ax.set_title("Raw image (+skeleton)")
-        if landmarks is not None:
-            pts = np.array(landmarks)
-            ax.scatter(pts[:, 0], pts[:, 1], c="cyan", s=12)
+    def _draw_landmarks_on_raw():
+        ax.imshow(img_rgb)
+        if landmarks is not None and len(landmarks) >= 21:
+            h_img, w_img = img_bgr.shape[:2]
+            pts = np.array([[lx * w_img, ly * h_img] for (lx, ly, _) in landmarks],
+                           dtype=np.float32)
+            _CONNECTIONS = [
+                (0,1),(0,5),(0,9),(0,13),(0,17),(5,9),(9,13),(13,17),
+                (1,2),(2,3),(3,4),(5,6),(6,7),(7,8),(9,10),(10,11),(11,12),
+                (13,14),(14,15),(15,16),(17,18),(18,19),(19,20),
+            ]
+            for a, b in _CONNECTIONS:
+                ax.plot([pts[a,0], pts[b,0]], [pts[a,1], pts[b,1]],
+                        color="#f39c12", lw=0.9, alpha=0.8)
+            tip_idxs = {4, 8, 12, 16, 20}
+            for idx, (px, py) in enumerate(pts):
+                c = "#e74c3c" if idx in tip_idxs else "#3498db"
+                ax.scatter([px], [py], c=c, s=10, zorder=5)
+        n_lm = len(landmarks) if landmarks is not None else 0
+        ax.set_title(f"Original + MediaPipe ({n_lm} landmarks)", fontsize=9)
 
-    _safe_draw(ax, _draw_raw, fallback_msg="Raw image unavailable")
+    _safe_draw(ax, _draw_landmarks_on_raw, fallback_msg="Original unavailable")
 
+    # [1] Finger Mask (original image space)
     ax = axs[1]
-    _safe_draw(ax, lambda: (ax.imshow(gray, cmap="gray"), ax.set_title("Gray")), fallback_msg="Gray unavailable")
+    def _draw_finger_mask():
+        if finger_mask is not None and finger_mask.ndim == 2:
+            vis = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).copy()
+            nz = int(np.count_nonzero(finger_mask))
+            total = finger_mask.size
+            pct = 100.0 * nz / max(total, 1)
+            vis = _overlay_mask(vis, finger_mask, color_rgb=(220, 60, 220))
+            ax.imshow(vis)
+            ax.set_title(f"Finger Mask (original)  {nz}px / {pct:.1f}%", fontsize=9)
+        else:
+            ax.imshow(img_rgb)
+            ax.text(0.5, 0.5, "Finger mask\nn/a", ha="center", va="center",
+                    transform=ax.transAxes, color="red", fontsize=10)
+            ax.set_title("Finger Mask (original)", fontsize=9)
 
+    _safe_draw(ax, _draw_finger_mask, fallback_msg="Finger mask unavailable")
+
+    # [2] Trapézoid
     ax = axs[2]
-    _safe_draw(ax, lambda: (ax.imshow(clahe_img, cmap="gray"), ax.set_title("CLAHE")), fallback_msg="CLAHE unavailable")
+    def _draw_trap():
+        ax.imshow(img_rgb)
+        corners = None
+        if trap is not None and "corners_px" in trap:
+            corners = np.asarray(trap["corners_px"], dtype=np.int32).reshape(4, 2)
+        if corners is not None:
+            poly = plt.Polygon(corners, fill=False, edgecolor="#2ecc71", linewidth=2)
+            ax.add_patch(poly)
+            ax.scatter(corners[:, 0], corners[:, 1],
+                       c=["#e74c3c", "#f39c12", "#3498db", "#9b59b6"], s=40, zorder=5)
+        trap_ok = bool(results.get("trap_ok", False))
+        reasons = results.get("trap_reasons") or []
+        ttl = "Trapézoid: ✓" if trap_ok else "Trapézoid: ✗"
+        if reasons:
+            ttl += f"  [{reasons[0]}]"
+        ax.set_title(ttl, fontsize=9,
+                     color="#2ecc71" if trap_ok else "#e74c3c")
 
+    _safe_draw(ax, _draw_trap, fallback_msg="Trapezoid unavailable")
+
+    # [3] Warped ROI — hand visible (F1: raw image warped, not masked)
     ax = axs[3]
-    def _draw_handmask():
-        if canon_img is not None and hand_mask_vis is not None:
-            ax.imshow(hand_mask_vis, cmap="gray")
-            try:
-                if int(np.count_nonzero(hand_mask_vis)) == 0:
-                    # Show a clear red warning in the subplot when the warped mask is empty
-                    ax.text(0.5, 0.5, "NO MASK DATA", color="red", fontsize=14, ha="center", va="center", transform=ax.transAxes)
-                    ax.set_title("Mask Empty (Warp Error?)", color="red")
-                else:
-                    ax.set_title("Hand mask (canonical ROI)")
-            except Exception:
-                ax.set_title("Hand mask (canonical ROI)")
+    def _draw_warped_roi():
+        if canon is not None:
+            ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB), aspect="auto")
+            ax.set_title(f"Warped ROI (kézzel, F1)  {canon.shape[1]}×{canon.shape[0]}px",
+                         fontsize=9)
         else:
-            ax.imshow(hand_mask, cmap="gray")
-            ax.set_title("Hand mask")
+            ax.set_facecolor("#f8e8e8")
+            reason = results.get("invalid_reason", "n/a")
+            ax.text(0.5, 0.5, f"Canon n/a\n{reason}", ha="center", va="center",
+                    transform=ax.transAxes, color="red", fontsize=9)
+            ax.set_title("Warped ROI (n/a)", fontsize=9)
 
-    _safe_draw(ax, _draw_handmask, fallback_msg="Hand mask unavailable")
+    _safe_draw(ax, _draw_warped_roi, fallback_msg="Warped ROI unavailable")
 
-    # Row 2
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SOR 2 – GEOMETRIA (F1)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # [4] Hand Mask in Canonical Space
     ax = axs[4]
-    def _draw_neckmask():
-        if canon_img is not None and neck_mask_vis is not None:
-            ax.imshow(neck_mask_vis, cmap="gray")
-            ax.set_title("Neck mask (canonical ROI)")
+    def _draw_hand_mask_canon():
+        if hand_mask is not None and hand_mask.ndim == 2:
+            nz = int(np.count_nonzero(hand_mask))
+            pct = 100.0 * nz / max(hand_mask.size, 1)
+            if nz == 0:
+                if canon is not None:
+                    ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB), aspect="auto",
+                              alpha=0.4)
+                ax.text(0.5, 0.5, "EMPTY MASK\n(warp error?)", ha="center", va="center",
+                        transform=ax.transAxes, color="red", fontsize=11,
+                        fontweight="bold")
+                ax.set_title("Hand Mask (canonical)  ← EMPTY", fontsize=9, color="red")
+            else:
+                # Overlay mask on canonical ROI
+                if canon is not None:
+                    vis = cv2.cvtColor(canon, cv2.COLOR_BGR2RGB)
+                    vis = _overlay_mask(vis, hand_mask, color_rgb=(180, 60, 220))
+                    ax.imshow(vis, aspect="auto")
+                else:
+                    ax.imshow(hand_mask, cmap="magma", aspect="auto")
+                ax.set_title(f"Hand Mask (canonical)  {nz}px / {pct:.1f}%", fontsize=9)
         else:
-            ax.imshow(neck_mask, cmap="gray")
-            ax.set_title("Neck mask")
+            if canon is not None:
+                ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB), aspect="auto")
+            ax.text(0.5, 0.5, "Hand mask\nn/a", ha="center", va="center",
+                    transform=ax.transAxes, color="orange", fontsize=9)
+            ax.set_title("Hand Mask (canonical)  n/a", fontsize=9)
 
-    _safe_draw(ax, _draw_neckmask, fallback_msg="Neck mask unavailable")
+    _safe_draw(ax, _draw_hand_mask_canon, fallback_msg="Hand mask unavailable")
 
+    # [5] Pre-shear Canonical ROI
     ax = axs[5]
-    _safe_draw(ax, lambda: (ax.imshow(edges_canny, cmap="gray"), ax.set_title("Canny edges")), fallback_msg="Canny unavailable")
+    def _draw_pre_shear():
+        src = canon_pre if canon_pre is not None else canon
+        if src is not None:
+            ax.imshow(cv2.cvtColor(src, cv2.COLOR_BGR2RGB), aspect="auto")
+            lbl = "Pre-shear ROI" if canon_pre is not None else "Canon (shear n/a)"
+            ax.set_title(lbl, fontsize=9)
+        else:
+            ax.set_facecolor("#f0f0f0")
+            ax.set_title("Pre-shear ROI  n/a", fontsize=9)
 
-    # ROI on raw
+    _safe_draw(ax, _draw_pre_shear, fallback_msg="Pre-shear unavailable")
+
+    # [6] Shear-corrected Canonical ROI
     ax = axs[6]
-    def _draw_roi():
-        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        ax.set_title("ROI (bbox + hull)")
-        _draw_bbox(ax, roi, color=(1, 0.5, 0))
-        ys, xs = np.where(neck_mask > 0)
-        pts = np.vstack([xs, ys]).T
-        if pts.shape[0] > 0:
-            hull = cv2.convexHull(pts.astype(np.int32))
-            ax.plot(hull[:, 0, 0], hull[:, 0, 1], color="yellow", linewidth=1.0)
+    def _draw_post_shear():
+        corrected = bool(shear.get("corrected", False))
+        shear_deg = float(shear.get("shear_angle_deg", 0.0))
+        residual  = float(shear.get("residual_shear_deg", 0.0))
+        conf      = float(shear.get("hough_confidence", 0.0))
+        if corrected and canon is not None:
+            ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB), aspect="auto")
+            ax.set_title(
+                f"Shear-korrigált ROI  Δ={shear_deg:.1f}°  res={residual:.2f}°",
+                fontsize=9, color="#2ecc71",
+            )
+        elif canon is not None:
+            ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB), aspect="auto")
+            ax.set_title(
+                f"Canon (nem korrigált)  shear={shear_deg:.1f}°  conf={conf:.2f}",
+                fontsize=9, color="#888888",
+            )
+        else:
+            ax.set_facecolor("#f0f0f0")
+            ax.set_title("Shear info  n/a", fontsize=9)
 
-    _safe_draw(ax, _draw_roi, fallback_msg="ROI unavailable")
+    _safe_draw(ax, _draw_post_shear, fallback_msg="Shear unavailable")
 
-    # Hough lines colored by angle
+    # [7] Hough Lines + Neck Angle
     ax = axs[7]
     def _draw_hough():
-        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        if lines is not None:
-            for ln in lines:
-                x1, y1, x2, y2 = ln[0]
-                angle = np.degrees(np.arctan2((y2 - y1), (x2 - x1)))
-                ax.plot([x1, x2], [y1, y2], color=_angle_color(angle), linewidth=1.2)
-        ax.set_title("Hough lines (angle color)")
+        ax.imshow(img_rgb)
+        if lines_raw:
+            for ln in lines_raw:
+                x1, y1, x2, y2 = ln
+                ang = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+                ax.plot([x1, x2], [y1, y2], color=_angle_color(ang), lw=1.0, alpha=0.7)
+        ang_deg = float(neck.get("angle_deg", 0.0))
+        n_long  = len((results.get("split") or {}).get("long_lines") or [])
+        n_fret  = len((results.get("split") or {}).get("fret_lines") or [])
+        ax.set_title(
+            f"Hough + Nyak  angle={ang_deg:.1f}°  "
+            f"long={n_long}  fret_lines={n_fret}",
+            fontsize=9,
+        )
 
     _safe_draw(ax, _draw_hough, fallback_msg="Hough unavailable")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SOR 3 – DETEKCIÓ (F2)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # [8] Sobel-X gradient on canonical
     ax = axs[8]
-    def _draw_profile():
+    def _draw_sobel_canon():
+        src = canon if canon is not None else img_bgr
+        gray_c = _safe_gray(src)
+        if gray_c is None:
+            ax.set_title("Sobel-X  n/a", fontsize=9)
+            return
+        sx = cv2.Sobel(gray_c, cv2.CV_32F, 1, 0, ksize=3)
+        sx_abs = np.abs(sx)
+        mx = float(sx_abs.max())
+        if mx > 0:
+            sx_abs = sx_abs / mx
+        ax.imshow(sx_abs, cmap="inferno", aspect="auto",
+                  vmin=0.0, vmax=1.0)
+        ax.set_title("Sobel-X Gradient (canonical)", fontsize=9)
+
+    _safe_draw(ax, _draw_sobel_canon, fallback_msg="Sobel unavailable")
+
+    # [9] Masked Intensity Profile + Peaks
+    ax = axs[9]
+    def _draw_masked_profile():
         if profile is None:
-            ax.text(0.5, 0.5, "No profile available", ha="center", va="center")
+            ax.text(0.5, 0.5, "No profile", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+            ax.set_title("Masked Profile  n/a", fontsize=9)
             return
         xs = np.arange(len(profile))
-        ax.plot(xs, profile, color="steelblue")
-        ax.fill_between(xs, profile, alpha=0.15)
-        if profile_raw is not None:
-            xs_raw = np.arange(len(profile_raw))
-            ax.plot(xs_raw, profile_raw, color="steelblue", alpha=0.3, lw=1.0)
-        ax.relim()
-        ax.autoscale_view()
-        ax.set_ylim(auto=True)
+        ax.fill_between(xs, profile, alpha=0.18, color="steelblue")
+        ax.plot(xs, profile, color="steelblue", lw=1.2)
+        # Raw detected peaks
         if len(peaks) > 0:
-            ax.scatter(peaks, profile[peaks], c="gray", s=20, label="peaks")
+            ax.scatter(peaks, profile[peaks], c="#e74c3c", s=25, zorder=5,
+                       label=f"peaks ({len(peaks)})")
+        # Raw fret detections
+        for i, fx in enumerate(fret_xs_raw):
+            ax.axvline(fx, color="#e67e22", lw=0.7, alpha=0.6,
+                       label="raw" if i == 0 else "")
+        # Fitted fret positions (green)
+        for i, (_, pfx) in enumerate(pred_x.items()):
+            ax.axvline(pfx, color="#2ecc71", lw=0.9, alpha=0.8,
+                       label="fitted" if i == 0 else "")
+        # Proto nut
         nut_x = nut.get("nut_x") if nut else None
-        candidates = results.get("nut_candidates") or []
-        for c in candidates:
-            ax.axvline(c.get("x", 0), color="yellow", linewidth=1.0, alpha=0.8)
         if nut_x is not None:
-            ax.axvline(nut_x, color="blue", linewidth=2.0, label="selected nut")
-        prom = peak_props.get("prominences") if isinstance(peak_props, dict) else None
-        if prom is not None and len(prom) > 0:
-            pmean = np.mean(prom)
-            ax.axhline(min(1.0, pmean), color="#888", ls=":", lw=0.9, label="mean-prom")
-        ax.set_title("Intensity profile & decisions")
+            ax.axvline(nut_x, color="yellow", lw=1.5, ls="--",
+                       label=f"nut @{int(nut_x)}px")
+        ax.set_xlim(0, len(profile))
+        ax.set_ylim(0, 1.05)
+        ax.legend(fontsize=6, loc="upper right", framealpha=0.7)
+        ax.grid(alpha=0.2)
+        mode = results.get("intensity_profile_mode", "?")
+        ax.set_title(
+            f"Profile ({mode})  peaks={len(peaks)}  "
+            f"raw={len(fret_xs_raw)}  fitted={len(pred_x)}",
+            fontsize=9,
+        )
 
-    _safe_draw(ax, _draw_profile, fallback_msg="Profile unavailable", show_axis=True)
-    # Debug: profile stats
-    try:
-        if profile is None:
-            print("Profile stats: None")
-        else:
-            print(f"Profile stats: len={len(profile)}, max={np.max(profile)}")
-            print(f"DEBUG: Profile max value: {np.max(profile) if profile is not None else 'None'}")
-            if profile_note is not None:
-                ax.text(0.02, 0.95, profile_note, transform=ax.transAxes, fontsize=8, color="#c0392b")
-    except Exception:
-        pass
+    _safe_draw(ax, _draw_masked_profile, fallback_msg="Profile unavailable",
+               show_axis=True)
 
-    ax = axs[9]
-    def _draw_thresholds():
-        ax.axis("off")
-        txt = []
-        txt.append(f"find_peaks count={len(peaks)}")
-        if isinstance(peak_props, dict):
-            for k, v in peak_props.items():
-                try:
-                    txt.append(f"{k}: {np.array(v).tolist()[:5]}")
-                except Exception:
-                    txt.append(f"{k}: (len={len(v)})")
-        ax.text(0.01, 0.98, "\n".join(txt), va="top", ha="left", fontsize=8, family="monospace")
-
-    _safe_draw(ax, _draw_thresholds, fallback_msg="Thresholds unavailable")
-
-    # Nut safety margin
+    # [10] Prototype Nut Visualization
     ax = axs[10]
-    def _draw_nutmargin():
-        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        nm = results.get("nut_margin_px") or results.get("nut_extend_amin_margin_px") or 0
-        if nut and nut.get("nut_x") is not None:
-            x = int(nut.get("nut_x"))
-            ax.axvline(x, color="blue", lw=2)
-            ax.axvline(x - nm, color="orange", lw=1, ls="--")
-            ax.axvline(x + nm, color="orange", lw=1, ls="--")
-        ax.set_title("Nut safety margin & extension")
+    def _draw_proto_nut():
+        src = canon if canon is not None else img_bgr
+        ax.imshow(cv2.cvtColor(src, cv2.COLOR_BGR2RGB), aspect="auto")
+        nut_x = nut.get("nut_x") if nut else None
+        nut_side = nut.get("side", "?") if nut else "?"
+        if nut_x is not None:
+            ax.axvline(nut_x, color="yellow", lw=2.0, ls="--",
+                       label=f"nut @{int(nut_x)}px side={nut_side}")
+            ax.legend(fontsize=7, loc="upper right", framealpha=0.75)
+            ax.set_title(
+                f"Proto Nut (debug only)  x={int(nut_x)}px  "
+                f"side={nut_side}  "
+                f"{'⚠ safety' if nut.get('safety') else ''}",
+                fontsize=9,
+            )
+        else:
+            ax.set_title("Proto Nut  (nem detektált)", fontsize=9, color="#888888")
 
-    _safe_draw(ax, _draw_nutmargin, fallback_msg="Nut margin unavailable")
+    _safe_draw(ax, _draw_proto_nut, fallback_msg="Proto nut unavailable")
 
-    # Row 4: final mapping
-    ax = axs[12]
-    def _draw_canon():
-        canon = results.get("canon") or img_bgr
-        ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
-        # Nyers szűrt detekciók – halvány referencia
-        for fx in (results.get("fret_xs_filt") or []):
-            ax.axvline(fx, color="#888888", lw=0.6, alpha=0.5)
-        # Illesztett pozíciók (17.817 szabály) – zöld, ezek a "valós" bund-helyek
-        _fit_d = results.get("fit") or {}
-        _pred = _fit_d.get("predicted_x") or {}
-        for _, pfx in _pred.items():
-            ax.axvline(pfx, color="#2ecc71", lw=1.0)
-        # Prototype nut – szaggatott sárga vonal (csak vizualizáció, nem kritikus út)
-        proto_nut_x = nut.get("nut_x") if nut else None
-        if proto_nut_x is not None:
-            ax.axvline(proto_nut_x, color="yellow", lw=1.5, ls="--", label="nut (proto)")
-        n_fitted = len(_pred)
-        ax.set_title(f"Canonical ROI + frets ({n_fitted} fitted)")
-
-    _safe_draw(ax, _draw_canon, fallback_msg="Canonical ROI unavailable")
-
-    ax = axs[13]
-    def _draw_tips():
-        canon = results.get("canon") or img_bgr
-        ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
-        for tp in touch_points:
-            x, y = int(tp[0]), int(tp[1])
-            ax.scatter([x], [y], c="lime", s=40)
-        ax.set_title("Touch points (TIPs)")
-
-    _safe_draw(ax, _draw_tips, fallback_msg="Touch points unavailable")
-
-    ax = axs[14]
-    def _draw_grid():
-        canon = results.get("canon") or img_bgr
-        ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
-        h, w = canon.shape[:2]
-        for i in range(6):
-            y = int(h * (0.15 + 0.7 * i / 5.0))
-            ax.axhline(y, color="#2c3e50", lw=0.6, alpha=0.6)
-        ax.set_title("6-string theoretical grid")
-
-    _safe_draw(ax, _draw_grid, fallback_msg="Grid unavailable")
-
-    # Textual summary
-    ax = axs[15]
-    def _draw_text():
+    # [11] Debug / Detection Info
+    ax = axs[11]
+    def _draw_debug_info():
         ax.axis("off")
-        lines = []
-        lines.append(f"Status: {'OK' if results.get('ok') else 'FAIL'}")
-        if results.get('intensity_profile_mode'):
-            lines.append(f"Profile mode: {results.get('intensity_profile_mode')}")
-        if results.get('intensity_auto_strategy'):
-            lines.append(f"Auto-strategy: {results.get('intensity_auto_strategy')}")
-        if shear:
-            lines.append(f"Shear: {shear}")
-        if not results.get('ok'):
-            reason = results.get('invalid_reason', 'n/a')
-            lines.append(f"Fail reason: {reason}")
-        ax.text(0.01, 0.99, "\n".join(lines), va="top", ha="left", fontsize=9, family="monospace")
+        lines_txt = []
+        lines_txt.append(f"── Fit ──────────────────────")
+        lines_txt.append(f"method: {fit.get('fit_method', '?')}")
+        lines_txt.append(f"coverage: {cov:.3f}")
+        lines_txt.append(f"inliers: {fit.get('inlier_count', '?')}/{fit.get('n_visible', '?')}")
+        lines_txt.append(f"avg_res: {fit.get('avg_residual_px', 0.0):.2f}px")
+        lines_txt.append(f"offset: {fit.get('offset', 0.0):.1f}  scale: {fit.get('scale', 0.0):.1f}")
+        lines_txt.append(f"── Peaks ────────────────────")
+        lines_txt.append(f"count: {len(peaks)}")
+        if isinstance(peak_props, dict):
+            prom = peak_props.get("prominences")
+            wid  = peak_props.get("widths")
+            if prom is not None and len(prom) > 0:
+                lines_txt.append(f"prom:  {[round(float(v), 2) for v in prom[:5]]}")
+            if wid is not None and len(wid) > 0:
+                lines_txt.append(f"width: {[round(float(v), 1) for v in wid[:5]]}")
+        lines_txt.append(f"── Shear ────────────────────")
+        lines_txt.append(f"corrected: {shear.get('corrected', False)}")
+        lines_txt.append(f"angle: {shear.get('shear_angle_deg', 0.0):.2f}°")
+        lines_txt.append(f"conf: {shear.get('hough_confidence', 0.0):.3f}")
+        lines_txt.append(f"── Detektor ─────────────────")
+        lines_txt.append(f"method: {results.get('fret_detector_method', '?')}")
+        lines_txt.append(f"mode: {results.get('intensity_profile_mode', '?')}")
+        auto = results.get("intensity_auto_strategy") or {}
+        if auto:
+            lines_txt.append(f"auto: {auto.get('reason', '?')}")
+        ax.text(0.02, 0.98, "\n".join(lines_txt), va="top", ha="left",
+                fontsize=7.5, family="monospace", transform=ax.transAxes)
+        ax.set_title("Detection Debug Info", fontsize=9)
 
-    _safe_draw(ax, _draw_text, fallback_msg="Summary unavailable")
+    _safe_draw(ax, _draw_debug_info, fallback_msg="Debug info unavailable")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SOR 4 – EREDMÉNY
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # [12] Final Overlay on Original (back-projected frets via H_inv)
+    ax = axs[12]
+    def _draw_final_overlay():
+        if img_bgr is None:
+            ax.set_facecolor("#f0f0f0")
+            ax.set_title("Final overlay  n/a", fontsize=9)
+            return
+        try:
+            from src.viz import PipelineVisualizer
+            viz = PipelineVisualizer()
+            overlay = viz.draw_fretboard_overlay(img_bgr, results)
+            if landmarks is not None:
+                overlay = viz.draw_landmarks(overlay, landmarks)
+            ax.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+        except Exception:
+            ax.imshow(img_rgb)
+        n_pred = len(pred_x)
+        nut_side = results.get("nut_side_hint", "?")
+        ax.set_title(
+            f"Final Overlay  frets={n_pred}  side={nut_side}",
+            fontsize=9, color=ok_color,
+        )
+
+    _safe_draw(ax, _draw_final_overlay, fallback_msg="Final overlay unavailable")
+
+    # [13] Canonical ROI + Fitted Frets
+    ax = axs[13]
+    def _draw_canon_frets():
+        src = canon if canon is not None else img_bgr
+        ax.imshow(cv2.cvtColor(src, cv2.COLOR_BGR2RGB), aspect="auto")
+        # Raw filtered – dim gray
+        for fx in fret_xs_filt:
+            ax.axvline(fx, color="#888888", lw=0.6, alpha=0.5)
+        # Fitted – green
+        for _, pfx in pred_x.items():
+            ax.axvline(pfx, color="#2ecc71", lw=1.0)
+        # Proto nut – dashed yellow
+        nut_x = nut.get("nut_x") if nut else None
+        if nut_x is not None:
+            ax.axvline(nut_x, color="yellow", lw=1.5, ls="--",
+                       label="nut (proto)")
+        n_fitted = len(pred_x)
+        ax.set_title(f"Canonical ROI + frets ({n_fitted} fitted)", fontsize=9)
+
+    _safe_draw(ax, _draw_canon_frets, fallback_msg="Canonical ROI unavailable")
+
+    # [14] Fingertips in Canonical Space
+    ax = axs[14]
+    def _draw_fingertips():
+        src = canon if canon is not None else img_bgr
+        ax.imshow(cv2.cvtColor(src, cv2.COLOR_BGR2RGB), aspect="auto")
+        _FINGER_COLORS = {4: "#e74c3c", 8: "#f39c12", 12: "#2ecc71",
+                          16: "#3498db", 20: "#9b59b6"}
+        _FINGER_NAMES  = {4: "Th", 8: "Idx", 12: "Mid", 16: "Rng", 20: "Pnk"}
+        for ft in fingertips:
+            cx = ft.get("canon_x")
+            cy = ft.get("canon_y")
+            tip = ft.get("tip_idx")
+            if cx is None or cy is None:
+                continue
+            c = _FINGER_COLORS.get(tip, "white")
+            n = _FINGER_NAMES.get(tip, "?")
+            fret = ft.get("fret_est")
+            lbl = f"{n}" if fret is None else f"{n}@f{fret:.0f}"
+            ax.scatter([cx], [cy], c=c, s=60, zorder=5)
+            ax.annotate(lbl, (cx, cy), textcoords="offset points",
+                        xytext=(3, -8), fontsize=6, color=c)
+        ax.set_title(f"Fingertips in Canon  ({len(fingertips)} tips)", fontsize=9)
+
+    _safe_draw(ax, _draw_fingertips, fallback_msg="Fingertips unavailable")
+
+    # [15] Pipeline Summary
+    ax = axs[15]
+    def _draw_summary():
+        ax.axis("off")
+        lines_txt = []
+        lines_txt.append(f"── Pipeline Összefoglaló ────")
+        lines_txt.append(f"Státusz : {'✓ OK' if ok else '✗ FAIL'}")
+        if not ok:
+            lines_txt.append(f"Hiba    : {results.get('invalid_reason', 'n/a')}")
+        lines_txt.append(f"Osztály : {results.get('class', '?')}")
+        lines_txt.append(f"Fájl    : {results.get('fname', results.get('path', '?'))}")
+        lines_txt.append(f"")
+        lines_txt.append(f"── Bund detektálás ──────────")
+        lines_txt.append(f"Raw detek  : {len(fret_xs_raw)}")
+        lines_txt.append(f"Filt detek : {len(fret_xs_filt)}")
+        lines_txt.append(f"Fitted     : {len(pred_x)}")
+        lines_txt.append(f"Coverage   : {cov:.4f}")
+        lines_txt.append(f"")
+        lines_txt.append(f"── Fitted X pozíciók ────────")
+        for fn, fx in sorted(pred_x.items()):
+            lines_txt.append(f"  Fret {int(fn):2d} → {float(fx):.1f}px")
+        lines_txt.append(f"")
+        lines_txt.append(f"── Prototype Nut ────────────")
+        if nut:
+            lines_txt.append(f"  x={nut.get('nut_x', 'n/a')}  side={nut.get('side', '?')}")
+            lines_txt.append(f"  safety={nut.get('safety', False)}")
+        else:
+            lines_txt.append("  n/a")
+        ax.text(0.02, 0.98, "\n".join(lines_txt), va="top", ha="left",
+                fontsize=7.5, family="monospace", transform=ax.transAxes,
+                color=ok_color if not ok else "black")
+        ax.set_title("Pipeline Summary", fontsize=9)
+
+    _safe_draw(ax, _draw_summary, fallback_msg="Summary unavailable")
+
+    # ── Vörös keret FAIL esetén ───────────────────────────────────────────────
+    if not ok:
+        for a in axs:
+            for spine in a.spines.values():
+                spine.set_edgecolor("#e74c3c")
+                spine.set_linewidth(1.5)
+
+    # ── Mentés ────────────────────────────────────────────────────────────────
     if save_path is not None:
         output_path = Path(save_path)
         if not output_path.is_absolute():
             output_path = _PROJECT_ROOT / output_path
         if output_path.suffix == "":
-            image_name = Path(results.get("fname", "diagnostic")).stem or "diagnostic"
-            timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-            output_path = output_path / f"diag_{timestamp}_{image_name}.png"
+            stem = Path(results.get("fname", "diagnostic")).stem or "diagnostic"
+            ts = datetime.now().strftime("%y%m%d_%H%M%S")
+            output_path = output_path / f"diag_{ts}_{stem}.png"
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, dpi=200, bbox_inches="tight")
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
         print(f"Mentés helye: {os.path.abspath(output_path)}")
-
-    # Fail-soft red frame
-    if not results.get('ok'):
-        for a in axs:
-            for spine in a.spines.values():
-                spine.set_edgecolor('red')
-                spine.set_linewidth(2.0)
 
     return fig
