@@ -2,6 +2,50 @@
 
 ---
 
+## 🗓️ 2026-05-20 – A blokkoló aspect ratio ellenőrzés átalakítása figyelmeztetéssé a No Hand esetek támogatásához
+
+### Motiváció
+
+A `run_v14_pipeline` korábban `return out` hívással megszakadt, ha a `validate_trapezoid`
+aspect-ratio, terület, vagy él-szög szanitás ellenőrzése nem teljesült.
+Kéz nélküli képeken (pl. statikus gitárfotók) a `_global_hough_fallback` megtalálja
+a nyakszegmenseket, de a kapott trapéz geometriája gyengébb mint kéz esetén →
+a pipeline minden No-Hand képre `trapezoid_sanity` hibával megszakadt, mielőtt
+megpróbálta volna kiszámítani a kanonikus ROI-t.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+1. **`validate_trapezoid` küszöb**: `min_aspect` default: 4.0 → 1.2.
+   A CFG `sanity_min_aspect` kulcs felülírja ezt, ha explicit be van állítva.
+
+2. **Sanity check: `return out` eltávolítva**:
+   - Ha a szanitás nem teljesül, a pipeline többé NEM tér vissza `invalid_reason="trapezoid_sanity"` hibával.
+   - Ehelyett: `print(f"[trap_sanity] WARNING — ...")` + `debug_info["trap_sanity_warning"]` bejegyzés.
+   - `trap_ok=False` és `trap_reasons` továbbra is bekerül a result dictbe (vizualizáció + audit).
+
+3. **`roi_min_height` kényszerítés `edge_info is None` esetén is**:
+   - Korábban: `if roi_height < min_h_px and edge_info is not None:`
+   - Most: `if roi_height < min_h_px:`, `perp` fallback = `[0.0, 1.0]` ha `edge_info` None.
+
+**`src/viz_diagnostics.py`**
+
+4. **Panel [3] — Warped ROI**: Ha `trap_ok=False`, narancssárga overlay szöveg jelzi a gyenge
+   trapézt (`⚠ Gyenge trapéz: <okok>`), a panel cím is narancssárga `⚠` jelzéssel.
+
+5. **Panel [8] — Sobel-X**: Ha `trap_ok=False`, a cím `"⚠ bizonytalan"` feliratot kap,
+   narancssárga színnel. Mindkét panel megjelenik `ok=False` esetén is, ha `canon` rendelkezésre áll.
+
+### Architektúra-invariancia
+
+- `validate_trapezoid` visszatérési értéke (`bool, list[str]`) változatlan.
+- A `trap_ok` / `trap_reasons` kulcsok megmaradnak → a notebook auditok nem törnek.
+- A szanitás-logika önálló függvényben marad; az orchestrátor döntése (figyelmeztetés vs. megszakítás)
+  a `run_v14_pipeline`-ban van.
+
+---
+
 ## 🗓️ 2026-05-20 – F3 Fázis kész: Irány-agnosztikus, relatív koordinátákon alapuló ML pipeline aktiválva
 
 ### Motiváció
