@@ -76,11 +76,14 @@ def export_dataset(
 ) -> Path:
     """Pipeline futtatása minden képre és ML adatok exportálása.
 
+    Jupyter notebookban tqdm progress bar-t jelenít meg.
+    Terminalban 25 képenként kiírja a haladást.
+
     Args:
         manifest_path: CSV útvonal (None → PATHS['manifest']).
         output_dir:    Kimeneti mappa (None → data/features/).
         img_size:      (W, H) célméret a CNN képekhez.
-        verbose:       Haladási kiírás 25 képenként.
+        verbose:       Haladási kiírás engedélyezése.
 
     Returns:
         output_dir Path ahol az npy fájlok vannak.
@@ -103,14 +106,15 @@ def export_dataset(
     class_to_idx = {c: i for i, c in enumerate(class_list)}
     N = len(df)
 
-    X_basic  = np.zeros((N, FEATURE_DIM),       dtype=np.float32)
-    X_inlay  = np.zeros((N, FEATURE_DIM_INLAY),  dtype=np.float32)
-    X_images = np.zeros((N, img_size[1], img_size[0], 3), dtype=np.float32)
-    y        = np.zeros(N, dtype=np.int64)
-    splits   = np.empty(N, dtype=object)
+    X_basic  = np.zeros((N, FEATURE_DIM),                    dtype=np.float32)
+    X_inlay  = np.zeros((N, FEATURE_DIM_INLAY),              dtype=np.float32)
+    X_images = np.zeros((N, img_size[1], img_size[0], 3),    dtype=np.float32)
+    y        = np.zeros(N,  dtype=np.int64)
+    splits   = np.empty(N,  dtype=object)
 
-    landmarker = get_landmarker()
-    _orig_print = builtins.print
+    landmarker   = get_landmarker()
+    _orig_print  = builtins.print
+    n_ok_counter = [0]   # mutable int a closure számára
 
     def _silent(*a, **k):
         msg = " ".join(str(x) for x in a)
@@ -118,7 +122,20 @@ def export_dataset(
             return
         _orig_print(*a, **k)
 
-    for i, row in df.iterrows():
+    # tqdm: Jupyter-ben notebook widget, terminalban ASCII bar
+    try:
+        from tqdm.auto import tqdm as _tqdm
+        _bar = _tqdm(
+            total=N,
+            desc="V14 export",
+            unit="kép",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+            dynamic_ncols=True,
+        )
+    except ImportError:
+        _bar = None
+
+    for i, (_, row) in enumerate(df.iterrows()):
         builtins.print = _silent
         result = run_v14_pipeline(
             {"path": row["path"], "class": row["class"]},
@@ -127,32 +144,45 @@ def export_dataset(
         builtins.print = _orig_print
 
         payload = get_ml_ready_payload(result, target_size=img_size)
+        ok_flag = bool(result.get("ok", False))
 
         X_basic[i]  = payload["feature_vec"]
         X_inlay[i]  = np.concatenate([payload["feature_vec"], _inlay_features(result)])
         X_images[i] = payload["image"]
         y[i]        = class_to_idx.get(str(row["class"]), 0)
         splits[i]   = str(row.get("split", "unknown"))
+        if ok_flag:
+            n_ok_counter[0] += 1
 
         del result, payload
 
-        if verbose and (i + 1) % 25 == 0:
-            _orig_print(f"  {i+1}/{N} feldolgozva", flush=True)
+        if _bar is not None:
+            n_ok = n_ok_counter[0]
+            _bar.set_postfix(ok=f"{n_ok}/{i+1} ({n_ok/(i+1)*100:.0f}%)",
+                             cls=str(row["class"]))
+            _bar.update(1)
+        elif verbose and (i + 1) % 25 == 0:
+            n_ok = n_ok_counter[0]
+            _orig_print(f"  {i+1}/{N}  ok={n_ok} ({n_ok/(i+1)*100:.0f}%)",
+                        flush=True)
 
-    np.save(output_dir / "X_basic.npy",   X_basic)
-    np.save(output_dir / "X_inlay.npy",   X_inlay)
-    np.save(output_dir / "X_images.npy",  X_images)
-    np.save(output_dir / "y.npy",         y)
-    np.save(output_dir / "splits.npy",    splits)
-    np.save(output_dir / "class_names.npy", np.array(class_list))
+    if _bar is not None:
+        _bar.close()
+
+    np.save(output_dir / "X_basic.npy",      X_basic)
+    np.save(output_dir / "X_inlay.npy",      X_inlay)
+    np.save(output_dir / "X_images.npy",     X_images)
+    np.save(output_dir / "y.npy",            y)
+    np.save(output_dir / "splits.npy",       splits)
+    np.save(output_dir / "class_names.npy",  np.array(class_list))
 
     if verbose:
+        n_ok = n_ok_counter[0]
         _orig_print(f"\nExport kész → {output_dir}")
         _orig_print(f"  X_basic:      {X_basic.shape}")
         _orig_print(f"  X_inlay:      {X_inlay.shape}")
         _orig_print(f"  X_images:     {X_images.shape}")
         _orig_print(f"  y:            {y.shape}  ({len(class_list)} osztály: {class_list})")
-        n_ok = int((X_basic[:, 43] > 0.5).sum())  # D_fretboard_detected index
         _orig_print(f"  Fretboard OK: {n_ok}/{N} ({n_ok/N*100:.1f}%)")
 
     return output_dir
