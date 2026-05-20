@@ -6,6 +6,46 @@
 
 ---
 
+## 🗓️ 2026-05-20 – Vizualizáció szinkronizálása a Nut-mentesített pipeline-hoz
+
+### Probléma
+
+Az F2 refaktor után a vizualizációs réteg három ponton nem volt szinkronban a Nut-mentes pipeline-nal:
+
+1. **`draw_fretboard_overlay` üres fit esetén:** Ha `step8_fit_fret_rule` nem adott `predicted_x` bejegyzéseket (pl. kevés bund detektált, fit sikertelen), a fő képen semmi sem jelent meg — holott `fret_xs_filt` tartalmazta a nyers detektált pozíciókat.
+
+2. **Diagnosztikai subplot (Canonical ROI) fret-szín:** A `_draw_canon` subplot pirossal rajzolta a `fret_xs_filt` nyers detektálásokat. A felhasználó a **17.817-es szabállyal illesztett** pozíciókat (`fit["predicted_x"]`) akarta zölddel látni, hogy a kanonikus térben a rendszer mit tart végső bund-pozíciónak.
+
+3. **`draw_master_dashboard` kanonikus panel:** Az egyetlen kékes vonal a `fret_xs_filt` nyers detektálásokból jött — az illesztett pozíciók (`predicted_x`) nem voltak vizuálisan elkülönítve.
+
+### Elvégzett változtatások
+
+**`src/viz.py`**
+
+**`draw_fretboard_overlay`:**
+- Az `if H_inv is not None and fit is not None:` feltétel lazítva: `pred_x` inicializálása a blokkon kívül `{}` értékre, a perspektíva-transzformáció blokk `if H_inv is not None:` feltételre változott.
+- **Fallback hozzáadva:** Ha `predicted_x` üres (`not pred_x`), a `fret_xs_filt` lista elemeit is visszavetíti `cv2.perspectiveTransform` + `H_inv` segítségével, ugyanolyan `_draw_outlined_line` hívással mint a fő ág. Ez biztosítja, hogy a fő képen minden esetben megjelennek a bundvonalak, még ha a 17.817 fit nem sikerül is.
+
+**`draw_master_dashboard` kanonikus panel (Panel 3):**
+- Nyers detekciók (`fret_xs_filt`) halvány kékeszürkével (`(120, 80, 80)` BGR) – referencia szint.
+- Illesztett pozíciók (`fit["predicted_x"]`) zölddel (`(50, 220, 50)` BGR) – ezek az "official" bund-helyek.
+- A panel felirata frissítve: `fitted=N raw=M` mutatja az illesztett és nyers bundok számát.
+
+**`src/viz_diagnostics.py`**
+
+**`_draw_canon` subplot:**
+- Nyers `fret_xs_filt` pozíciók: halvány szürke (`#888888`, `lw=0.6, alpha=0.5`) referenciaként megmaradnak.
+- Illesztett pozíciók (`fit["predicted_x"]`): zöld (`#2ecc71`, `lw=1.0`) — ezek a rendszer végső bund-álláspontjai.
+- Subplot felirat: `"Canonical ROI + frets (N fitted)"`.
+
+### Architektúra-invariancia
+
+- Az inverz projekció (`cv2.perspectiveTransform` + `H_inv`) mind az elsődleges, mind a fallback ágban pontosan ugyanúgy fut le.
+- A `nut=None` eset nem okoz leállást: `nut_info = points.get("nut") or {}` és minden `nut[...]` hozzáférés `if nut is not None:` feltétel mögött van.
+- A változtatások nem érintik a feature extraction logikát vagy az ML pipeline-t.
+
+---
+
 ## 🗓️ 2026-05-20 – F1 Fázis Implementáció: Projekciós hiba elhárítása inverz transzformációval és maszkolási sorrend módosítása
 
 ### Probléma
