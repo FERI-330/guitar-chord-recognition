@@ -229,119 +229,114 @@ def create_full_pipeline_audit(image, results, save_path=None):
     fig, axs = plt.subplots(4, 4, figsize=(24, 18), constrained_layout=True)
     axs = axs.reshape(-1)
 
+    def _safe_draw(ax, draw_fn, fallback_msg="Unavailable", show_axis=False):
+        try:
+            ax.cla()
+            draw_fn()
+        except Exception as e:
+            ax.cla()
+            try:
+                ax.text(0.5, 0.5, f"{fallback_msg}: {type(e).__name__}: {e}", ha="center", va="center")
+            except Exception:
+                pass
+        finally:
+            if not show_axis:
+                ax.axis("off")
+
     # Row 1
     ax = axs[0]
-    ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    ax.set_title("Raw image (+skeleton)")
-    if landmarks is not None:
-        try:
+    def _draw_raw():
+        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+        ax.set_title("Raw image (+skeleton)")
+        if landmarks is not None:
             pts = np.array(landmarks)
             ax.scatter(pts[:, 0], pts[:, 1], c="cyan", s=12)
-        except Exception:
-            pass
-    ax.axis("off")
+
+    _safe_draw(ax, _draw_raw, fallback_msg="Raw image unavailable")
 
     ax = axs[1]
-    ax.imshow(gray, cmap="gray")
-    ax.set_title("Gray")
-    ax.axis("off")
+    _safe_draw(ax, lambda: (ax.imshow(gray, cmap="gray"), ax.set_title("Gray")), fallback_msg="Gray unavailable")
 
     ax = axs[2]
-    ax.imshow(clahe_img, cmap="gray")
-    ax.set_title("CLAHE")
-    ax.axis("off")
+    _safe_draw(ax, lambda: (ax.imshow(clahe_img, cmap="gray"), ax.set_title("CLAHE")), fallback_msg="CLAHE unavailable")
 
     ax = axs[3]
-    # Show mask in canonical ROI coords if available, otherwise raw mask
-    try:
+    def _draw_handmask():
         if canon_img is not None and hand_mask_vis is not None:
             ax.imshow(hand_mask_vis, cmap="gray")
             ax.set_title("Hand mask (canonical ROI)")
         else:
             ax.imshow(hand_mask, cmap="gray")
             ax.set_title("Hand mask")
-    except Exception:
-        ax.text(0.5, 0.5, "Mask unavailable", ha="center", va="center")
-    ax.axis("off")
+
+    _safe_draw(ax, _draw_handmask, fallback_msg="Hand mask unavailable")
 
     # Row 2
     ax = axs[4]
-    try:
+    def _draw_neckmask():
         if canon_img is not None and neck_mask_vis is not None:
             ax.imshow(neck_mask_vis, cmap="gray")
             ax.set_title("Neck mask (canonical ROI)")
         else:
             ax.imshow(neck_mask, cmap="gray")
             ax.set_title("Neck mask")
-    except Exception:
-        ax.text(0.5, 0.5, "Mask unavailable", ha="center", va="center")
-    ax.axis("off")
+
+    _safe_draw(ax, _draw_neckmask, fallback_msg="Neck mask unavailable")
 
     ax = axs[5]
-    ax.imshow(edges_canny, cmap="gray")
-    ax.set_title("Canny edges")
-    ax.axis("off")
+    _safe_draw(ax, lambda: (ax.imshow(edges_canny, cmap="gray"), ax.set_title("Canny edges")), fallback_msg="Canny unavailable")
 
     # ROI on raw
     ax = axs[6]
-    ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    ax.set_title("ROI (bbox + hull)")
-    _draw_bbox(ax, roi, color=(1, 0.5, 0))
-    # convex hull from neck_mask
-    try:
+    def _draw_roi():
+        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+        ax.set_title("ROI (bbox + hull)")
+        _draw_bbox(ax, roi, color=(1, 0.5, 0))
         ys, xs = np.where(neck_mask > 0)
         pts = np.vstack([xs, ys]).T
         if pts.shape[0] > 0:
             hull = cv2.convexHull(pts.astype(np.int32))
             ax.plot(hull[:, 0, 0], hull[:, 0, 1], color="yellow", linewidth=1.0)
-    except Exception:
-        pass
-    ax.axis("off")
+
+    _safe_draw(ax, _draw_roi, fallback_msg="ROI unavailable")
 
     # Hough lines colored by angle
     ax = axs[7]
-    ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    if lines is not None:
-        for ln in lines:
-            x1, y1, x2, y2 = ln[0]
-            angle = np.degrees(np.arctan2((y2 - y1), (x2 - x1)))
-            ax.plot([x1, x2], [y1, y2], color=_angle_color(angle), linewidth=1.2)
-    ax.set_title("Hough lines (angle color)")
-    ax.axis("off")
+    def _draw_hough():
+        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+        if lines is not None:
+            for ln in lines:
+                x1, y1, x2, y2 = ln[0]
+                angle = np.degrees(np.arctan2((y2 - y1), (x2 - x1)))
+                ax.plot([x1, x2], [y1, y2], color=_angle_color(angle), linewidth=1.2)
+        ax.set_title("Hough lines (angle color)")
 
-    # Row 3: profiling
+    _safe_draw(ax, _draw_hough, fallback_msg="Hough unavailable")
     ax = axs[8]
-    if profile is not None:
+    def _draw_profile():
+        if profile is None:
+            ax.text(0.5, 0.5, "No profile available", ha="center", va="center")
+            return
         xs = np.arange(len(profile))
         ax.plot(xs, profile, color="steelblue")
         ax.fill_between(xs, profile, alpha=0.15)
-        # Ensure axis rescales to shown data
-        try:
-            ax.relim()
-            ax.autoscale_view()
-        except Exception:
-            pass
-        # plot peaks
+        ax.relim()
+        ax.autoscale_view()
         if len(peaks) > 0:
             ax.scatter(peaks, profile[peaks], c="gray", s=20, label="peaks")
-        # nut candidates
-        nut_x = None
-        if nut:
-            nut_x = nut.get("nut_x")
-        # highlight candidates from results (if any)
+        nut_x = nut.get("nut_x") if nut else None
         candidates = results.get("nut_candidates") or []
         for c in candidates:
             ax.axvline(c.get("x", 0), color="yellow", linewidth=1.0, alpha=0.8)
         if nut_x is not None:
             ax.axvline(nut_x, color="blue", linewidth=2.0, label="selected nut")
-        # show prominences / widths from peak_props
         prom = peak_props.get("prominences") if isinstance(peak_props, dict) else None
         if prom is not None and len(prom) > 0:
-            # draw a faint horizontal line at mean prominence normalized
             pmean = np.mean(prom)
             ax.axhline(min(1.0, pmean), color="#888", ls=":", lw=0.9, label="mean-prom")
-    else:
-        ax.text(0.5, 0.5, "No profile available", ha="center", va="center")
+        ax.set_title("Intensity profile & decisions")
+
+    _safe_draw(ax, _draw_profile, fallback_msg="Profile unavailable", show_axis=True)
     # Debug: profile stats
     try:
         if profile is None:
@@ -352,81 +347,89 @@ def create_full_pipeline_audit(image, results, save_path=None):
                 ax.text(0.02, 0.95, profile_note, transform=ax.transAxes, fontsize=8, color="#c0392b")
     except Exception:
         pass
-    ax.set_title("Intensity profile & decisions")
 
     ax = axs[9]
-    # show thresholds used by find_peaks
-    ax.axis("off")
-    txt = []
-    txt.append(f"find_peaks count={len(peaks)}")
-    if isinstance(peak_props, dict):
-        for k, v in peak_props.items():
-            try:
-                txt.append(f"{k}: {np.array(v).tolist()[:5]}")
-            except Exception:
-                txt.append(f"{k}: (len={len(v)})")
-    ax.text(0.01, 0.98, "\n".join(txt), va="top", ha="left", fontsize=8, family="monospace")
+    def _draw_thresholds():
+        ax.axis("off")
+        txt = []
+        txt.append(f"find_peaks count={len(peaks)}")
+        if isinstance(peak_props, dict):
+            for k, v in peak_props.items():
+                try:
+                    txt.append(f"{k}: {np.array(v).tolist()[:5]}")
+                except Exception:
+                    txt.append(f"{k}: (len={len(v)})")
+        ax.text(0.01, 0.98, "\n".join(txt), va="top", ha="left", fontsize=8, family="monospace")
+
+    _safe_draw(ax, _draw_thresholds, fallback_msg="Thresholds unavailable")
 
     # Nut safety margin
     ax = axs[10]
-    ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    nm = results.get("nut_margin_px") or results.get("nut_extend_amin_margin_px") or 0
-    if nut and nut.get("nut_x") is not None:
-        x = int(nut.get("nut_x"))
-        ax.axvline(x, color="blue", lw=2)
-        ax.axvline(x - nm, color="orange", lw=1, ls="--")
-        ax.axvline(x + nm, color="orange", lw=1, ls="--")
-    ax.set_title("Nut safety margin & extension")
-    ax.axis("off")
+    def _draw_nutmargin():
+        ax.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+        nm = results.get("nut_margin_px") or results.get("nut_extend_amin_margin_px") or 0
+        if nut and nut.get("nut_x") is not None:
+            x = int(nut.get("nut_x"))
+            ax.axvline(x, color="blue", lw=2)
+            ax.axvline(x - nm, color="orange", lw=1, ls="--")
+            ax.axvline(x + nm, color="orange", lw=1, ls="--")
+        ax.set_title("Nut safety margin & extension")
+
+    _safe_draw(ax, _draw_nutmargin, fallback_msg="Nut margin unavailable")
 
     # Row 4: final mapping
     ax = axs[12]
-    canon = results.get("canon") or img_bgr
-    ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
-    frets = results.get("fret_xs_filt") or []
-    for fx in frets:
-        ax.axvline(fx, color="#e74c3c", lw=1.0)
-    ax.set_title("Canonical ROI + frets")
-    ax.axis("off")
+    def _draw_canon():
+        canon = results.get("canon") or img_bgr
+        ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
+        frets = results.get("fret_xs_filt") or []
+        for fx in frets:
+            ax.axvline(fx, color="#e74c3c", lw=1.0)
+        ax.set_title("Canonical ROI + frets")
+
+    _safe_draw(ax, _draw_canon, fallback_msg="Canonical ROI unavailable")
 
     ax = axs[13]
-    ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
-    # draw touch points
-    for tp in touch_points:
-        try:
+    def _draw_tips():
+        canon = results.get("canon") or img_bgr
+        ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
+        for tp in touch_points:
             x, y = int(tp[0]), int(tp[1])
             ax.scatter([x], [y], c="lime", s=40)
-        except Exception:
-            pass
-    ax.set_title("Touch points (TIPs)")
-    ax.axis("off")
+        ax.set_title("Touch points (TIPs)")
+
+    _safe_draw(ax, _draw_tips, fallback_msg="Touch points unavailable")
 
     ax = axs[14]
-    # theoretical 6-string grid overlay
-    ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
-    h, w = canon.shape[:2]
-    for i in range(6):
-        y = int(h * (0.15 + 0.7 * i / 5.0))
-        ax.axhline(y, color="#2c3e50", lw=0.6, alpha=0.6)
-    ax.set_title("6-string theoretical grid")
-    ax.axis("off")
+    def _draw_grid():
+        canon = results.get("canon") or img_bgr
+        ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB))
+        h, w = canon.shape[:2]
+        for i in range(6):
+            y = int(h * (0.15 + 0.7 * i / 5.0))
+            ax.axhline(y, color="#2c3e50", lw=0.6, alpha=0.6)
+        ax.set_title("6-string theoretical grid")
+
+    _safe_draw(ax, _draw_grid, fallback_msg="Grid unavailable")
 
     # Textual summary
     ax = axs[15]
-    ax.axis("off")
-    lines = []
-    lines.append(f"Status: {'OK' if results.get('ok') else 'FAIL'}")
-    if results.get('intensity_profile_mode'):
-        lines.append(f"Profile mode: {results.get('intensity_profile_mode')}")
-    if results.get('intensity_auto_strategy'):
-        lines.append(f"Auto-strategy: {results.get('intensity_auto_strategy')}")
-    if shear:
-        lines.append(f"Shear: {shear}")
-    if not results.get('ok'):
-        reason = results.get('invalid_reason', 'n/a')
-        lines.append(f"Fail reason: {reason}")
+    def _draw_text():
+        ax.axis("off")
+        lines = []
+        lines.append(f"Status: {'OK' if results.get('ok') else 'FAIL'}")
+        if results.get('intensity_profile_mode'):
+            lines.append(f"Profile mode: {results.get('intensity_profile_mode')}")
+        if results.get('intensity_auto_strategy'):
+            lines.append(f"Auto-strategy: {results.get('intensity_auto_strategy')}")
+        if shear:
+            lines.append(f"Shear: {shear}")
+        if not results.get('ok'):
+            reason = results.get('invalid_reason', 'n/a')
+            lines.append(f"Fail reason: {reason}")
+        ax.text(0.01, 0.99, "\n".join(lines), va="top", ha="left", fontsize=9, family="monospace")
 
-    ax.text(0.01, 0.99, "\n".join(lines), va="top", ha="left", fontsize=9, family="monospace")
+    _safe_draw(ax, _draw_text, fallback_msg="Summary unavailable")
 
     if save_path is not None:
         output_path = Path(save_path)
