@@ -43,6 +43,56 @@ A pipeline két szorosan összefüggő hibát tartalmazott:
 
 ---
 
+## 🗓️ 2026-05-20 – F2 Fázis Implementáció: Nut (nyereg) detekció de-priorizálása és áttérés a lebegő bund-hálózatokra
+
+### Probléma
+
+A pipeline korábban a Nut (gitár nyereg / 0. bund) detektálást kötelező lépésként kezelte a kritikus döntési útvonalban:
+
+1. **Törékeny nut-alapú absolút bund-számozás:** A `step8_fit_fret_rule(nut_anchored=True)` hívás a nut pozícióját rögzített origónak tekintette a bund-hálózat illesztésekor. Ha a nut-detektálás hibás volt (pl. rossz oldal, zajra reagált), az egész bund-számozás eltolódott.
+
+2. **step6c_trim_to_nut kényszere:** A ROI trimmelés a detektált nut-pozícióhoz igazította a kanonikus képet. Ez instabilitást okozott: ha a nut nem volt látható (pl. fogás messze van a fejtől), az egész kanonikus tér elcsúszott.
+
+3. **Felesleges komplexitás:** `_make_safety_nut` fallback, `hand_bnd_x` számítás, kétszeres nut-keresés (trim előtt és shear-korrekció után) — mind a kritikus úton volt, növelve a meghibásodási felületet.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+- **Importok:** `step6b_find_nut`, `step6c_trim_to_nut`, `step6_extend_for_nut` (geometry) és `get_fretboard_near_edge` (hand_landmark) eltávolítva az importokból — kommenttel jelezve az új helyet (`prototype_nut_detector.py`).
+- **`_make_safety_nut` függvény:** Eltávolítva a kritikus útból — átkerült `src/prototype_nut_detector.py`-ba.
+- **`GeometricFretDetector.detect()`:** `nut_anchored=True` → `nut_anchored=False`; a `nut_side` paraméter eltávolítva mindkét `step8_fit_fret_rule` hívásból. A detektor mostantól csak a megtalált bund x-koordináták lebegő hálózatát adja vissza, abszolút számozás nélkül.
+- **`run_v14_pipeline()`:**
+  - `hand_bnd_x` számítás blokk eltávolítva (`get_fretboard_near_edge` + `_project_landmark_to_canon`)
+  - `step6b_find_nut` detektálás blokk eltávolítva
+  - `_make_safety_nut` fallback blokk eltávolítva
+  - `step6c_trim_to_nut` + H2 re-warp + hand_mask szinkronizáció blokk eltávolítva
+  - Post-shear `step6b_find_nut` hívás blokk eltávolítva
+  - `out["nut"] = None` placeholder hozzáadva (prototype vizualizáció használja)
+  - `detect()` hívásokból `nut=out.get("nut")` paraméter eltávolítva
+
+**`src/prototype_nut_detector.py`** (ÚJ FÁJL)
+
+- `_make_safety_nut()` — áthelyezve fretboard.py-ból
+- `_project_landmark_to_canon()` — segédfüggvény (privát másolat, proto használatra)
+- `detect_nut_prototype(result: dict) -> Optional[dict]` — publikus API: opcionálisan hívható egy kész pipeline result dict-ből; SOHA nem kerülhet a FretDetectorba vagy ML feature vektorokba.
+- Modul-szintű docstring hangsúlyozza a korlátozást.
+
+**`src/viz_diagnostics.py`**
+
+- `try/except`-tel importálja `detect_nut_prototype`-t (`_detect_nut_proto`).
+- `nut = results.get("nut") or {}` sor helyett: `_detect_nut_proto(results)` hívás, ha elérhető.
+- `_draw_canon()` szubplotban: ha a prototype nut x ismert, szaggatott sárga (`--`) axvline-t rajzol rá `"nut (proto)"` felirattal.
+
+### Architektúra-invariancia
+
+- `src/logic.py` nem igényelt módosítást: `map_fingers_to_frets` már korábban gracefully kezeli a `nut=None` esetet (a nut-check egyszerűen kihagyódik).
+- `src/features.py` nem igényelt módosítást: a Group G `fret_est/N_FRETS` normalizáció a `step9_project_fingertips` kimenetére támaszkodik, amelynek a lebegő bund-hálózattal is helyes értékei vannak.
+- A `detect()` interfész `nut: Optional[dict] = None` paramétere megmarad backward-kompatibilitásból, de az érték mostantól mindig `None`.
+- A `GeometricFretDetector` és `IntensityFretDetector` `nut_anchored=False`-szal futnak — a 17.817 szabály lebegő illesztése nem függ origó-rögzítéstől.
+
+---
+
 ## 🗓️ 2026-05-12 – EDA fázis (`01_EDA.ipynb`)
 
 ### Elvégzett műveletek

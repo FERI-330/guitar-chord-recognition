@@ -6,6 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from scipy import signal
 
+try:
+    from src.prototype_nut_detector import detect_nut_prototype as _detect_nut_proto
+except Exception:
+    _detect_nut_proto = None
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _OUTPUT_DIR = _PROJECT_ROOT / "output"
 
@@ -282,8 +287,14 @@ def create_full_pipeline_audit(image, results, save_path=None):
         except Exception:
             peaks = []
 
-    # Nut info
-    nut = results.get("nut") or {}
+    # Nut info – kritikus útból eltávolítva; prototype detector adja vizualizációhoz
+    _proto_nut = None
+    if _detect_nut_proto is not None:
+        try:
+            _proto_nut = _detect_nut_proto(results)
+        except Exception:
+            pass
+    nut = _proto_nut or {}
 
     # Fingertips / touch points
     touch_points = results.get("touch_points") or []
@@ -461,6 +472,10 @@ def create_full_pipeline_audit(image, results, save_path=None):
         frets = results.get("fret_xs_filt") or []
         for fx in frets:
             ax.axvline(fx, color="#e74c3c", lw=1.0)
+        # Prototype nut – szaggatott sárga vonal (csak vizualizáció, nem kritikus út)
+        proto_nut_x = nut.get("nut_x") if nut else None
+        if proto_nut_x is not None:
+            ax.axvline(proto_nut_x, color="yellow", lw=1.5, ls="--", label="nut (proto)")
         ax.set_title("Canonical ROI + frets")
 
     _safe_draw(ax, _draw_canon, fallback_msg="Canonical ROI unavailable")
