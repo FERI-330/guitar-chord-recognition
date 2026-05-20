@@ -433,23 +433,25 @@ class PipelineVisualizer:
             fret_thickness = self._resolve_line_thickness(vis)
             for fret_n, fx in pred_x.items():
                 fx = float(fx)
-                # A bund egy függőleges vonal a kanonikus térben (x=fx, y=0..H)
-                pt_top = np.array([fx, 0.0, 1.0])
-                pt_bot = np.array([fx, float(CANONICAL_H), 1.0])
-                proj_top = H_inv @ pt_top
-                proj_bot = H_inv @ pt_bot
-                if abs(proj_top[2]) < 1e-9 or abs(proj_bot[2]) < 1e-9:
+                # Back-project two canonical points (top and bottom) using perspectiveTransform
+                try:
+                    canon_pts = np.array([[[fx, 0.0]], [[fx, float(CANONICAL_H)]]], dtype=np.float32)
+                    proj = cv2.perspectiveTransform(canon_pts, H_inv)
+                    p_top = proj[0, 0]
+                    p_bot = proj[1, 0]
+                    if np.isclose(p_top[0], 0.0) and np.isclose(p_top[1], 0.0) and np.isclose(p_bot[0], 0.0):
+                        # degenerate projection
+                        continue
+                    tx, ty = int(round(float(p_top[0]))), int(round(float(p_top[1])))
+                    bx, by = int(round(float(p_bot[0]))), int(round(float(p_bot[1])))
+                    self._draw_outlined_line(
+                        vis, (tx, ty), (bx, by),
+                        color=self.fret_color,
+                        thickness=fret_thickness,
+                        outline_thickness=fret_thickness + 2,
+                    )
+                except Exception:
                     continue
-                tx = int(round(proj_top[0] / proj_top[2]))
-                ty = int(round(proj_top[1] / proj_top[2]))
-                bx = int(round(proj_bot[0] / proj_bot[2]))
-                by = int(round(proj_bot[1] / proj_bot[2]))
-                self._draw_outlined_line(
-                    vis, (tx, ty), (bx, by),
-                    color=self.fret_color,
-                    thickness=fret_thickness,
-                    outline_thickness=fret_thickness + 2,
-                )
                 # Minden 3. bund számozva
                 if int(fret_n) % 3 == 0 and int(fret_n) > 0:
                     lx = (tx + bx) // 2
@@ -761,16 +763,15 @@ class PipelineVisualizer:
         color: tuple,
     ) -> None:
         """Egy bund visszavetítése a kanonikus térből az eredeti képre (in-place)."""
-        pt_top = np.array([fx, 0.0, 1.0])
-        pt_bot = np.array([fx, float(CANONICAL_H), 1.0])
-        proj_top = H_inv @ pt_top
-        proj_bot = H_inv @ pt_bot
-        if abs(proj_top[2]) < 1e-9 or abs(proj_bot[2]) < 1e-9:
+        try:
+            canon_pts = np.array([[[fx, 0.0]], [[fx, float(CANONICAL_H)]]], dtype=np.float32)
+            proj = cv2.perspectiveTransform(canon_pts, H_inv)
+            p_top = proj[0, 0]
+            p_bot = proj[1, 0]
+            tx, ty = int(round(float(p_top[0]))), int(round(float(p_top[1])))
+            bx, by = int(round(float(p_bot[0]))), int(round(float(p_bot[1])))
+        except Exception:
             return
-        tx = int(round(proj_top[0] / proj_top[2]))
-        ty = int(round(proj_top[1] / proj_top[2]))
-        bx = int(round(proj_bot[0] / proj_bot[2]))
-        by = int(round(proj_bot[1] / proj_bot[2]))
         thickness = self._resolve_line_thickness(image)
         self._draw_outlined_line(
             image, (tx, ty), (bx, by),

@@ -327,9 +327,14 @@ def create_full_pipeline_audit(image, results, save_path=None):
     def _draw_handmask():
         if canon_img is not None and hand_mask_vis is not None:
             ax.imshow(hand_mask_vis, cmap="gray")
-            if hand_mask_empty and landmarks is not None:
-                ax.set_title("Mask Empty (Warp Error?)")
-            else:
+            try:
+                if int(np.count_nonzero(hand_mask_vis)) == 0:
+                    # Show a clear red warning in the subplot when the warped mask is empty
+                    ax.text(0.5, 0.5, "NO MASK DATA", color="red", fontsize=14, ha="center", va="center", transform=ax.transAxes)
+                    ax.set_title("Mask Empty (Warp Error?)", color="red")
+                else:
+                    ax.set_title("Hand mask (canonical ROI)")
+            except Exception:
                 ax.set_title("Hand mask (canonical ROI)")
         else:
             ax.imshow(hand_mask, cmap="gray")

@@ -631,15 +631,22 @@ class IntensityFretDetector(FretDetectorInterface):
                 profile = None
                 raw_profile = None
 
-        nut_side = nut["side"] if nut else None
+        # Intensity detector: do not require a detected Nut for fitting.
+        # Treat any provided `nut` only as debug information, but do not
+        # anchor the fit to it. This makes detection robust when Nut is missing.
+        nut_side = None
+        if nut:
+            debug_info["nut_provided"] = True
+            debug_info["nut_info"] = {k: nut.get(k) for k in ("side", "nut_x", "width_px") if k in nut}
         refine_enabled = bool(CFG.get("fret_refine_enabled", True))
         refine_tol = float(CFG.get("fret_refine_tol_px", 12.0))
 
         try:
+            # Do not anchor the fit to Nut for intensity-based detector.
             fit_pass1 = step8_fit_fret_rule(
                 fret_xs_filt,
-                nut_anchored=(nut_side is not None),
-                nut_side=nut_side,
+                nut_anchored=False,
+                nut_side=None,
             )
             fit = fit_pass1
             if refine_enabled and len(fret_xs_filt) >= 3:
@@ -648,8 +655,8 @@ class IntensityFretDetector(FretDetectorInterface):
                     fret_xs_filt = refined_frets
                     fit = step8_fit_fret_rule(
                         fret_xs_filt,
-                        nut_anchored=(nut_side is not None),
-                        nut_side=nut_side,
+                        nut_anchored=False,
+                        nut_side=None,
                     )
         except Exception as exc:
             debug_info.update(_make_debug_info("step8_fit", exc, mode=active_mode))
@@ -886,6 +893,23 @@ def run_v14_pipeline(img_entry: dict,
         out["debug_info"]["warp"] = _make_debug_info("warp", exc)
         return out
     out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
+
+# Warp the original finger_mask into canonical ROI using the same homography.
+# Do this separately (do not mask the source image before warping).
+    try:
+        fm = out.get("finger_mask")
+        if fm is not None:
+            Wc = int(CFG.get("canonical_w"))
+            Hc = int(CFG.get("canonical_h"))
+            try:
+                hand_mask_canon = cv2.warpPerspective(fm, H, (Wc, Hc), flags=cv2.INTER_NEAREST)
+            except Exception:
+                # fallback: attempt simple resize
+                hand_mask_canon = cv2.resize(fm, (Wc, Hc), interpolation=cv2.INTER_NEAREST)
+            # store canonical hand mask for downstream viz and feature extraction
+            out["hand_mask"] = hand_mask_canon
+    except Exception as exc:
+        out["debug_info"]["hand_mask_warp"] = _make_debug_info("hand_mask_warp", exc)
 
     side_hint = None
     try:

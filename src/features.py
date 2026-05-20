@@ -276,3 +276,76 @@ def load_features(path: Optional[Path] = None) -> dict:
         "coverage": data["coverage"],
         "feature_names": list(data["feature_names"]),
     }
+
+
+def extract_ml_features(result: dict) -> dict:
+    """Extract ML-ready artifacts from a pipeline result.
+
+    Returns a dict containing:
+      - 'cnn_roi': canonical BGR ROI (with hand intact) suitable for CNN input
+      - 'finger_rel_pos': np.ndarray (5,) relative finger positions between neighbor frets (0..1 or np.nan)
+      - 'profile_masked': 1D np.ndarray normalized profile computed while ignoring masked (hand) rows
+    """
+    canon = result.get("canon")
+    out = {"cnn_roi": None, "finger_rel_pos": None, "profile_masked": None}
+    if canon is None:
+        return out
+    out["cnn_roi"] = canon.copy()
+
+    # Predicted fret x positions
+    fit = result.get("fit") or {}
+    pred = fit.get("predicted_x", {}) if fit else {}
+    pred_xs = sorted([float(v) for v in pred.values()]) if pred else []
+
+    # Finger canonical x positions
+    fingertips = result.get("fingertips") or []
+    rels = np.full((5,), np.nan, dtype=np.float32)
+    # fingertips are returned as list of dicts with 'tip_idx' and 'canon_x'
+    tip_map = {fp.get("tip_idx"): fp for fp in fingertips}
+    from src.constants import FINGER_TIP_IDX
+    for i, tip_idx in enumerate(FINGER_TIP_IDX):
+        fp = tip_map.get(tip_idx)
+        if fp is None:
+            continue
+        cx = fp.get("canon_x")
+        if cx is None or not pred_xs or len(pred_xs) < 2:
+            rels[i] = np.nan
+            continue
+        # Find neighboring frets
+        left = None
+        right = None
+        for px in pred_xs:
+            if px <= cx:
+                left = px
+            elif px > cx and right is None:
+                right = px
+        if left is None or right is None or abs(right - left) < 1e-6:
+            rels[i] = np.nan
+        else:
+            rel = float((cx - left) / (right - left))
+            rels[i] = float(np.clip(rel, 0.0, 1.0))
+    out["finger_rel_pos"] = rels
+
+    # Compute masked intensity profile: ignore rows where hand mask indicates finger/palm
+    try:
+        gray = cv2.cvtColor(canon, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        W = gray.shape[1]
+        hand_mask = result.get("hand_mask") or result.get("hand_mask_canon")
+        if hand_mask is not None and hand_mask.shape[:2] == gray.shape[:2] and np.count_nonzero(hand_mask) > 0:
+            prof = np.zeros((W,), dtype=np.float32)
+            for x in range(W):
+                col = gray[:, x]
+                mask_col = hand_mask[:, x]
+                vals = col[mask_col == 0]
+                if vals.size == 0:
+                    vals = col
+                prof[x] = float(np.mean(vals)) if vals.size > 0 else 0.0
+        else:
+            prof = gray.mean(axis=0).astype(np.float32)
+        if prof.max() > 1e-6:
+            prof = prof / float(prof.max())
+        out["profile_masked"] = prof
+    except Exception:
+        out["profile_masked"] = None
+
+    return out
