@@ -53,12 +53,16 @@ CFG: dict = {
     # STEP 6 – Trapézoid clamp (ROI stabilizálás)
     "trapezoid_clamp_enabled": False,    # wrist-alapú ROI clamp: KI (Nut regresszió ellen)
     "trapezoid_clamp_margin_px": 120,    # ha BE: test-oldali margó px (régi hardcoded: 30)
+    # STEP 6 – Sanity checks (kezdeti, megengedőbb fázis)
+    "sanity_min_aspect": 2.5,
+    "sanity_area_limits": {"min_frac": 0.004, "max_frac": 0.70},
+    "sanity_max_edge_angle_diff_deg": 20.0,
     # STEP 6b – Nut detektálás
     "nut_width_filter_enabled": True,   # FWHM-alapú nut vs. bund diszkrimináció
     "nut_constraints": NUT_CONSTRAINTS,
     "nut_width_constraints": NUT_WIDTH_CONSTRAINTS,
-    "nut_min_width_px": NUT_CONSTRAINTS["min_width"],   # minimális FWHM px, ami nut-ra utal
-    "nut_max_width_px": NUT_CONSTRAINTS["max_width"],   # maximális FWHM px (ujj kizárása); None = nincs felső korlát
+    "nut_min_width_px": 5.0,           # minimális FWHM px, ami nut-ra utal
+    "nut_max_width_px": 24.0,          # maximális FWHM px (ujj kizárása); None = nincs felső korlát
     "nut_n_candidates": 5,              # top-N csúcs vizsgálata (argmax helyett)
     # ── Kéz-határvezérelt Nut-keresési sáv ──────────────────────────────────
     "hand_boundary_enabled": True,      # landmark-alapú keresési sáv korlátozás
@@ -69,8 +73,8 @@ CFG: dict = {
     "nut_fallback_extend_px": 80,       # statikus kiterjesztés ha nut nem detektálható
     "nut_extend_amin_margin_px": 120,   # extra margó a legközelebbi landmark mögé (px)
     # STEP 8 – Fret rule fitting
-    "step8_tol_px": 10.0,
-    "step8_ratio_tol": 0.08,
+    "step8_tol_px": 12.0,
+    "step8_ratio_tol": 0.10,
     "step8_scale_min_factor": 1.0,
     "step8_scale_max_factor": 8.0,
     # ── Fantom-bund szűrés (post-fit refine) ────────────────────────────────
