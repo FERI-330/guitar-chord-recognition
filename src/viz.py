@@ -20,7 +20,7 @@ Tervezési elvek:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -82,6 +82,137 @@ def _save_figure(fig: plt.Figure, save_path, dpi: int = 120) -> None:
                     pil_kwargs={"quality": 85, "optimize": True})
     else:
         fig.savefig(p, dpi=dpi, bbox_inches="tight", pad_inches=0)
+
+
+_FINGER_MAPPING_STYLE = {
+    "thumb": {"label": "Hüvelykujj", "color_bgr": (255, 0, 255)},
+    "index": {"label": "Mutató", "color_bgr": (255, 0, 0)},
+    "middle": {"label": "Középső", "color_bgr": (0, 200, 0)},
+    "ring": {"label": "Gyűrűs", "color_bgr": (0, 0, 255)},
+    "pinky": {"label": "Kisujj", "color_bgr": (0, 255, 255)},
+}
+
+
+def _finger_point_from_mapping(mapping: Mapping[str, Any]) -> Optional[tuple[float, float]]:
+    """Return the best available 2D point from a per-finger mapping record."""
+    point = None
+    for key in ("touch_xy", "canon_xy", "tip_xy"):
+        candidate = mapping.get(key)
+        if candidate is not None:
+            point = candidate
+            break
+    if point is None:
+        return None
+    if isinstance(point, Sequence) and len(point) >= 2:
+        try:
+            x = float(point[0])
+            y = float(point[1])
+        except Exception:
+            return None
+        if np.isnan(x) or np.isnan(y):
+            return None
+        return (x, y)
+    return None
+
+
+def finger_mapping_table_rows(mappings: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Build compact, notebook-friendly rows for finger-to-fret summary tables."""
+    rows: list[dict[str, Any]] = []
+    for finger_key, style in _FINGER_MAPPING_STYLE.items():
+        info = mappings.get(finger_key) or {}
+        fret_value = info.get("fret", "OUT")
+        point = _finger_point_from_mapping(info) or (None, None)
+        rows.append(
+            {
+                "ujj": style["label"],
+                "bund": f"F{int(fret_value)}" if isinstance(fret_value, int) else "OUT",
+                "x": None if point[0] is None else round(float(point[0]), 1),
+                "y": None if point[1] is None else round(float(point[1]), 1),
+                "fret": fret_value,
+            }
+        )
+    return rows
+
+
+def draw_finger_mapping(roi: np.ndarray, mappings: Mapping[str, Any]) -> np.ndarray:
+    """Draw finger touch-points and fret labels on a canonical ROI image.
+
+    The function uses semi-transparent filled circles (alpha=0.6) and a fixed
+    color palette so the dashboard can stay visually consistent.
+    """
+    if roi is None or not isinstance(mappings, Mapping):
+        return roi
+
+    vis = roi.copy()
+
+    overlay = vis.copy()
+    h, w = vis.shape[:2]
+    radius = max(6, int(round(min(h, w) * 0.025)))
+    font_scale = max(0.45, min(h, w) / 650.0)
+    thickness = max(1, int(round(min(h, w) * 0.0025)))
+
+    for finger_key, style in _FINGER_MAPPING_STYLE.items():
+        info = mappings.get(finger_key) or {}
+        point = _finger_point_from_mapping(info)
+        if point is None:
+            continue
+
+        x = int(round(point[0]))
+        y = int(round(point[1]))
+        if x < 0 or y < 0 or x >= w or y >= h:
+            continue
+
+        color = style["color_bgr"]
+        label = style["label"]
+        fret_value = info.get("fret", "OUT")
+        fret_text = f"F{int(fret_value)}" if isinstance(fret_value, int) else "OUT"
+
+        cv2.circle(overlay, (x, y), radius, color, -1, lineType=cv2.LINE_AA)
+
+        text = f"{label}: {fret_text}"
+        text_x = min(x + radius + 6, w - 4)
+        text_y = max(y - radius - 4, 14)
+    vis = cv2.addWeighted(overlay, 0.6, vis, 0.4, 0)
+
+    for finger_key, style in _FINGER_MAPPING_STYLE.items():
+        info = mappings.get(finger_key) or {}
+        point = _finger_point_from_mapping(info)
+        if point is None:
+            continue
+
+        x = int(round(point[0]))
+        y = int(round(point[1]))
+        if x < 0 or y < 0 or x >= w or y >= h:
+            continue
+
+        color = style["color_bgr"]
+        label = style["label"]
+        fret_value = info.get("fret", "OUT")
+        fret_text = f"F{int(fret_value)}" if isinstance(fret_value, int) else "OUT"
+        text = f"{label}: {fret_text}"
+        text_x = min(x + radius + 6, w - 4)
+        text_y = max(y - radius - 4, 14)
+        cv2.putText(
+            vis,
+            text,
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (0, 0, 0),
+            thickness + 2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            vis,
+            text,
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+    return vis
 
 
 # ─────────────────────────────────────────────────────────────────────────────
