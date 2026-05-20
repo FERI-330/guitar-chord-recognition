@@ -100,6 +100,9 @@ def detect_inlays_prototype(result: dict) -> list:
     amplitúdójú Sobel-X csúcspárokat, amelyek gitár nyakjelző (inlay) pontok
     két szélét reprezentálhatják.
 
+    A `hand_mask` (kanonikus tér, uint8) oszlopait lenullázza a profil-elemzés
+    előtt, hogy az ujjak ne generálhassanak hamis inlay-jelölteket.
+
     Args:
         result: run_v14_pipeline() visszatérési értéke.
 
@@ -121,6 +124,15 @@ def detect_inlays_prototype(result: dict) -> list:
         if mx < 1e-3:
             return []
         col_profile = col_profile / mx
+
+        # Ujj-maszk alapú elnyomás: ahol a kézmaszk > 0, ott a profil 0-ra áll.
+        # Ugyanolyan logikával, mint az IntensityFretDetector.detect()-ben.
+        hand_mask = result.get("hand_mask")
+        if hand_mask is not None:
+            col_has_hand = np.any(hand_mask > 0, axis=0)
+            if col_has_hand.shape[0] == col_profile.shape[0]:
+                col_profile[col_has_hand] = 0.0
+
         col_profile = gaussian_filter1d(col_profile, sigma=0.8)
 
         peaks, _ = find_peaks(

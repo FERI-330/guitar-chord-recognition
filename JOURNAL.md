@@ -2,6 +2,33 @@
 
 ---
 
+## 🗓️ 2026-05-20 – Inlay prototípus frissítése: ujj-maszkolás bevezetése a hamis pozitív detektálások elkerülése érdekében
+
+### Motiváció
+
+A `detect_inlays_prototype` algoritmus a teljes Sobel-X oszlopprofilon futott, beleértve az
+ujjakkal takart területeket is. Ennek következtében az ujjak éles Sobel-gradiensei könnyen
+hamis `dupla kis csúcs` párokat generáltak inlay-jelöltként — különösen ott, ahol az ujj
+éle egybeesett egy nyakjelző közelségével.
+
+### Elvégzett változtatások
+
+**`src/prototype_nut_detector.py` — `detect_inlays_prototype`**
+
+- A `result["hand_mask"]` (kanonikus tér, uint8) olvasása a profil-elemzés előtt.
+- `col_has_hand = np.any(hand_mask > 0, axis=0)` — azonos logika mint az `IntensityFretDetector.detect()`-ben.
+- `col_profile[col_has_hand] = 0.0` — az ujjak alatti oszlopok elnémítva.
+- Az elnyomás a normalizálás után, a Gaussian-simítás előtt történik.
+- Ha `hand_mask` nem elérhető (kéz nélküli mód), az algoritmus változatlanul fut.
+
+### Elvárt hatás
+
+- Ha egy ujj egy inlay fölé kerül, a kék pötty eltűnik a vizualizációból (helyes viselkedés).
+- Kéz nélküli képen (`hand_mask` all-zero vagy None) az inlay-detektálás változatlan.
+- Nincs hatása a `FretDetector`-ra vagy a feature vektorra — tisztán vizualizáció-szintű változtatás.
+
+---
+
 ## 🗓️ 2026-05-20 – Kéz nélküli fallback mód, ROI minimális magasság fix, inlay-detektálás kísérleti fázis
 
 ### Motiváció
