@@ -166,6 +166,7 @@ def create_full_pipeline_audit(image, results, save_path=None):
     # Debug: mask stats
     try:
         print(f"Mask stats: hand min={hand_mask_vis.min()}, max={hand_mask_vis.max()}, non-zero={np.count_nonzero(hand_mask_vis)}")
+        print(f"DEBUG: Hand mask sum: {np.sum(hand_mask_vis)}")
     except Exception:
         print("Mask stats: hand mask unavailable")
 
@@ -181,7 +182,12 @@ def create_full_pipeline_audit(image, results, save_path=None):
     shear = results.get("shear") or {}
 
     # Intensity profile
-    profile = results.get("intensity_profile")
+    profile = results.get("profile")
+    if profile is None:
+        profile = results.get("intensity_profile")
+    profile_raw = results.get("profile_raw")
+    if profile_raw is None:
+        profile_raw = results.get("raw_profile")
     # prefer profile from results; if missing or empty, compute from canonical ROI
     if profile is None:
         if canon_img is not None:
@@ -208,6 +214,27 @@ def create_full_pipeline_audit(image, results, save_path=None):
                     print(f"[viz_diagnostics] Profile empty — recomputed from raw canonical ROI")
     except Exception:
         pass
+
+    # Debug: ROI mean intensity
+    try:
+        print(f"DEBUG: ROI mean intensity: {float(np.mean(gray))}")
+    except Exception:
+        print("DEBUG: ROI mean intensity: None")
+
+    # Clean up profile arrays for plotting
+    def _clean_profile(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return None
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        return arr
+
+    profile = _clean_profile(profile)
+    profile_raw = _clean_profile(profile_raw)
+    if profile_raw is None and profile is not None:
+        profile_raw = profile.copy()
 
     # Find peaks if profile exists
     peaks = []
@@ -264,7 +291,10 @@ def create_full_pipeline_audit(image, results, save_path=None):
     def _draw_handmask():
         if canon_img is not None and hand_mask_vis is not None:
             ax.imshow(hand_mask_vis, cmap="gray")
-            ax.set_title("Hand mask (canonical ROI)")
+            if np.count_nonzero(hand_mask_vis) == 0 and landmarks is not None:
+                ax.set_title("Mask Empty (Check Warp!)")
+            else:
+                ax.set_title("Hand mask (canonical ROI)")
         else:
             ax.imshow(hand_mask, cmap="gray")
             ax.set_title("Hand mask")
@@ -320,8 +350,12 @@ def create_full_pipeline_audit(image, results, save_path=None):
         xs = np.arange(len(profile))
         ax.plot(xs, profile, color="steelblue")
         ax.fill_between(xs, profile, alpha=0.15)
+        if profile_raw is not None and profile_raw is not profile:
+            xs_raw = np.arange(len(profile_raw))
+            ax.plot(xs_raw, profile_raw, color="steelblue", alpha=0.3, lw=1.0)
         ax.relim()
         ax.autoscale_view()
+        ax.set_ylim(auto=True)
         if len(peaks) > 0:
             ax.scatter(peaks, profile[peaks], c="gray", s=20, label="peaks")
         nut_x = nut.get("nut_x") if nut else None
@@ -343,6 +377,7 @@ def create_full_pipeline_audit(image, results, save_path=None):
             print("Profile stats: None")
         else:
             print(f"Profile stats: len={len(profile)}, max={np.max(profile)}")
+            print(f"DEBUG: Profile max value: {np.max(profile) if profile is not None else 'None'}")
             if profile_note is not None:
                 ax.text(0.02, 0.95, profile_note, transform=ax.transAxes, fontsize=8, color="#c0392b")
     except Exception:
