@@ -111,48 +111,63 @@ def _global_hough_fallback(img: np.ndarray, edges: np.ndarray) -> list:
     Two-pass strategy — accepts lines up to ±30° from horizontal:
     Pass 1: standard permissive params (threshold=20, minLen=w//5).
     Pass 2 (triggered when majority of raw lines are vertical, or < 2 horizontal
-            lines found): relax Hough params but keep the ≤30° horizontal filter.
-    Vertical lines (angle > 30°) are always rejected.
+            lines found): relax Hough params, still horizontal-only.
+
+    Post-processing filters (applied once after the winning pass):
+    - Border exclusion: drops lines whose both Y-endpoints are within 5% of the
+      image top/bottom edge (Canny image-border artefact).
+    - Length filter: keeps only lines whose length ≥ 40% of the longest accepted
+      line, so short edge fragments cannot skew the neck angle estimate.
 
     Returns same format as step2_hough: list of (x1, y1, x2, y2) tuples,
     sorted by length descending.
     """
-    _MAX_ANGLE = 30.0  # raised from 15° — allows slightly tilted guitar necks
+    _MAX_ANGLE = 30.0  # allows slightly tilted guitar necks (was 15°)
 
-    def _extract_horiz(raw):
-        """Split raw HoughLinesP output into horizontal (≤30°) and vertical (>30°)."""
+    def _filter_horizontal(raw):
+        """Return (length, seg) pairs: near-horizontal, non-border lines only."""
         if raw is None:
             return [], []
+        img_h = edges.shape[0]
+        border_y = int(img_h * 0.05)
         horiz, vert = [], []
         for ln in raw:
             x1, y1, x2, y2 = int(ln[0][0]), int(ln[0][1]), int(ln[0][2]), int(ln[0][3])
+            # Skip lines hugging image border — likely Canny artefacts, not guitar neck
+            if max(y1, y2) < border_y or min(y1, y2) > img_h - border_y:
+                continue
             a = abs(float(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
             if a > 90.0:
                 a = 180.0 - a
             length = float(np.hypot(x2 - x1, y2 - y1))
             (horiz if a <= _MAX_ANGLE else vert).append((length, (x1, y1, x2, y2)))
         horiz.sort(key=lambda p: -p[0])
-        return [p[1] for p in horiz], [p[1] for p in vert]
+        return horiz, vert
 
     h, w = edges.shape[:2]
 
     # Pass 1
     raw1 = cv2.HoughLinesP(edges, rho=1, theta=np.pi / 180,
                             threshold=20, minLineLength=max(w // 5, 60), maxLineGap=30)
-    horiz, vert = _extract_horiz(raw1)
+    horiz, vert = _filter_horizontal(raw1)
 
     # Pass 2: if majority are vertical (neck lines drowned out) or too few horizontal
     n_total = len(horiz) + len(vert)
     if len(horiz) < 2 or (n_total > 0 and len(vert) > len(horiz)):
         raw2 = cv2.HoughLinesP(edges, rho=1, theta=np.pi / 180,
                                 threshold=12, minLineLength=max(w // 8, 40), maxLineGap=50)
-        horiz2, _ = _extract_horiz(raw2)
+        horiz2, _ = _filter_horizontal(raw2)
         if len(horiz2) > len(horiz):
-            horiz = horiz2
-            print(f"  [hough_fallback] pass2 rescued {len(horiz)} horizontal lines "
+            print(f"  [hough_fallback] pass2 rescued {len(horiz2)} lines "
                   f"(pass1: {len(horiz)} horiz / {len(vert)} vert)")
+            horiz = horiz2
 
-    return horiz
+    # Length filter: keep only lines ≥ 40% of longest — suppress short noise fragments
+    if len(horiz) >= 2:
+        max_len = horiz[0][0]
+        horiz = [(l, seg) for (l, seg) in horiz if l >= max_len * 0.40]
+
+    return [seg for (_, seg) in horiz]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -956,6 +971,36 @@ def run_v14_pipeline(img_entry: dict,
             out["invalid_reason"] = "no_trapezoid"
         return out
 
+    # No-hand fallback: clamp trapezoid Y extent to the actual Y range of the
+    # detected lines + 15% margin.  Prevents step6_trapezoid from producing a ROI
+    # that spans the full image height when the fallback lines occupy only a
+    # narrow band (e.g. guitar neck far from image edges).
+    try:
+        _is_no_hand_fallback = (out.get("debug_info", {}).get("hough", {}).get("fallback")
+                                == "global_hough_no_hand")
+        if _is_no_hand_fallback:
+            _fb_lines = out.get("lines") or []
+            if len(_fb_lines) >= 2:
+                _all_ys = [y for (_x1, _y1, _x2, _y2) in _fb_lines for y in (_y1, _y2)]
+                _y_span = float(max(_all_ys) - min(_all_ys))
+                _margin = max(int(_y_span * 0.15), 5)
+                _y_min = max(0, int(min(_all_ys)) - _margin)
+                _y_max = min(img.shape[0] - 1, int(max(_all_ys)) + _margin)
+                _c = trap["corners_px"].astype(np.float64)
+                _c[:, 1] = np.clip(_c[:, 1], _y_min, _y_max)
+                trap = dict(trap)
+                trap["corners_px"] = _c.astype(np.float32)
+                trap["w_start"] = float(np.linalg.norm(trap["corners_px"][1] - trap["corners_px"][0]))
+                trap["w_end"] = float(np.linalg.norm(trap["corners_px"][2] - trap["corners_px"][3]))
+                out["trap"] = trap
+                out["debug_info"]["fallback_roi_clamp"] = {
+                    "y_min": _y_min, "y_max": _y_max, "n_lines": len(_fb_lines),
+                }
+                print(f"  [fallback_roi_clamp] Y clamped to [{_y_min}, {_y_max}] "
+                      f"from {len(_fb_lines)} lines (span={_y_span:.0f}px margin={_margin}px)")
+    except Exception as exc:
+        out["debug_info"]["fallback_roi_clamp"] = _make_debug_info("fallback_roi_clamp", exc)
+
     # ROI minimum height: if fretboard strip is thinner than 15% of the image height,
     # expand corners symmetrically outward along the perp direction.
     # Guard: when edge_info is None the fallback perp [0,1] is vertical — skip expansion
@@ -1016,18 +1061,40 @@ def run_v14_pipeline(img_entry: dict,
         out["debug_info"]["trap_sanity_warning"] = reasons
         print(f"  [trap_sanity] WARNING — continuing with sub-optimal trapezoid: {', '.join(reasons)}")
 
-    # Orientation guard: a trapezoid taller than wide means the warp would produce a
-    # 90°-rotated ROI instead of the expected wide fretboard strip — reject it early.
+    # Orientation guard: a trapezoid taller than wide COMBINED with non-horizontal
+    # Hough lines indicates a 90°-rotated detection.
+    # However, if the Hough lines are predominantly horizontal (length-weighted mean
+    # angle ≤ 20°), a tall bounding box can be legitimate — e.g. guitar close to
+    # camera with a wide field of view.  In that case log a warning but allow the warp.
     try:
         _c = trap["corners_px"].astype(np.float64)
         _trap_w = float((np.linalg.norm(_c[1] - _c[0]) + np.linalg.norm(_c[2] - _c[3])) / 2.0)
         _trap_h = float((np.linalg.norm(_c[3] - _c[0]) + np.linalg.norm(_c[2] - _c[1])) / 2.0)
         out["debug_info"]["trap_orientation"] = {"trap_w": _trap_w, "trap_h": _trap_h}
         if _trap_h > _trap_w:
-            out["invalid_reason"] = f"trap_orientation: h({_trap_h:.0f})>w({_trap_w:.0f})"
-            out["debug_info"]["trap_orientation"]["reason"] = "vertical_trapezoid_rejected"
-            print(f"  [trap_orient] REJECT: vertical trapezoid h={_trap_h:.0f}>w={_trap_w:.0f}px")
-            return out
+            # Compute length-weighted mean angle of the Hough lines used for this frame
+            _all_lines = out.get("lines") or []
+            _ang_vals, _ang_wts = [], []
+            for (_lx1, _ly1, _lx2, _ly2) in _all_lines:
+                _a = abs(float(np.degrees(np.arctan2(_ly2 - _ly1, _lx2 - _lx1))))
+                if _a > 90.0:
+                    _a = 180.0 - _a
+                _ang_vals.append(_a)
+                _ang_wts.append(float(np.hypot(_lx2 - _lx1, _ly2 - _ly1)))
+            _mean_ang = (float(np.average(_ang_vals, weights=_ang_wts))
+                         if _ang_wts else 90.0)
+            out["debug_info"]["trap_orientation"]["lines_mean_angle"] = _mean_ang
+            if _mean_ang <= 20.0:
+                out["debug_info"]["trap_orientation"]["reason"] = "tall_but_horizontal_lines_allowed"
+                print(f"  [trap_orient] ALLOW: tall trap (h={_trap_h:.0f}>w={_trap_w:.0f}) "
+                      f"but lines_mean_angle={_mean_ang:.1f}°≤20° → likely close-up camera")
+            else:
+                out["invalid_reason"] = (f"trap_orientation: h({_trap_h:.0f})>w({_trap_w:.0f}) "
+                                         f"lines_angle={_mean_ang:.1f}°")
+                out["debug_info"]["trap_orientation"]["reason"] = "vertical_trapezoid_rejected"
+                print(f"  [trap_orient] REJECT: vertical trap h={_trap_h:.0f}>w={_trap_w:.0f}px "
+                      f"lines_mean_angle={_mean_ang:.1f}°")
+                return out
     except Exception as exc:
         out["debug_info"]["trap_orientation"] = _make_debug_info("trap_orientation", exc)
 

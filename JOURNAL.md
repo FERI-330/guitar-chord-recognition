@@ -2,6 +2,56 @@
 
 ---
 
+## 🗓️ 2026-05-20 – No Hand mód stabilizálása: adaptív orientáció-őr, ROI-centrálás és hossz-alapú szűrés
+
+### Motiváció
+
+Az előző munkamenet `trap_orientation` blokkja (`_trap_h > _trap_w → return out`) hamisan
+dobta el a közel-horizontális, de valamilyen okból "magas" trapézokat (pl. gitár közel a
+kamerához, széles látószög). A Hough vonalak szöge nem volt figyelembe véve, holott ez
+az igazi döntési alap: ha a vonalak horizontálisak, a trapéz "magassága" csak a perspektíva
+torzítása, nem 90°-os forgás.
+
+Ezen kívül a fallback vonalak Y-kiterjedése nem volt korlátozva → a ROI néha az egész
+képmagasságra kiterjedt. A rövid éltöredékek (image border Canny artefaktok) is torzíthatták
+a szögbecslést.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+1. **`_global_hough_fallback` — két új post-processing szűrő**:
+   - **Border exclusion**: kihagyja azokat a vonalakat, amelyek mindkét Y-végpontja
+     a kép tetejétől / aljától 5%-on belül van (Canny border artefaktum szűrése).
+   - **Length filter**: csak azokat a vonalakat tartja meg, amelyek hossza ≥ 40%-a a
+     leghosszabb elfogadott vonal hosszának. Megakadályozza, hogy rövid
+     éltöredékek torzítsák a nyakszög-becslést.
+   - Belső helper neve: `_filter_horizontal` (volt: `_extract_horiz`) — visszaad
+     `(length, seg)` párokat, az utolsó lépésig megtartva a hossz-információt.
+
+2. **Fallback ROI Y-kiterjedés korlátozása** (új blokk, `trap is None` check után):
+   - Csak ha `debug_info["hough"]["fallback"] == "global_hough_no_hand"`.
+   - Az összes fallback-vonal Y-koordinátájának min/max értékét + 15% margint vesz alapul.
+   - A trapézoid sarokpontok Y-koordinátáit `np.clip`-eli erre a tartományra.
+   - `debug_info["fallback_roi_clamp"]` bejegyzés tartalmazza: `y_min`, `y_max`, `n_lines`.
+
+3. **Adaptív orientáció guard** (a korábbi merev `_trap_h > _trap_w → return` helyett):
+   - Ha `_trap_h > _trap_w`: kiszámolja a Hough-vonalak **hossz-súlyozott átlagszögét**.
+   - Ha `_mean_ang ≤ 20°`: a vonalak horizontálisak → trapéz átengedve
+     (`reason = "tall_but_horizontal_lines_allowed"`, print-log).
+   - Ha `_mean_ang > 20°`: valódi 90°-os rotáció → `return out`
+     (`reason = "vertical_trapezoid_rejected"`, `invalid_reason` tartalmazza a szöget is).
+   - `debug_info["trap_orientation"]` tartalmazza: `trap_w`, `trap_h`, `lines_mean_angle`, `reason`.
+
+### Architektúra-invariancia
+
+- `_global_hough_fallback` visszatérési formátuma változatlan (`list[(x1,y1,x2,y2)]`).
+- Az orientáció guard csak a `_trap_h > _trap_w` esetben fut le részletesen — ha a trapéz
+  vízszintes (normál eset), a kód `debug_info["trap_orientation"] = {trap_w, trap_h}`
+  bejegyzéssel továbblép.
+
+---
+
 ## 🗓️ 2026-05-20 – Hough fallback stabilizálása: szög-alapú szűrés bevezetése a 90 fokkal elforgatott ROI-k elkerülésére
 
 ### Motiváció
