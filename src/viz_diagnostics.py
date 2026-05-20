@@ -42,7 +42,9 @@ def create_full_pipeline_audit(image, results):
     if image is not None:
         img_bgr = image.copy()
     else:
-        img_bgr = results.get("img") or results.get("canon")
+        img_bgr = results.get("img")
+        if img_bgr is None:
+            img_bgr = results.get("canon")
 
     if img_bgr is None:
         # Nothing to draw
