@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime
+from pathlib import Path
 from scipy import signal
 
 
@@ -28,7 +30,7 @@ def _angle_color(angle_deg):
     return cmap(a)
 
 
-def create_full_pipeline_audit(image, results):
+def create_full_pipeline_audit(image, results, save_path=None):
     """Create a comprehensive 4x4 diagnostics figure.
 
     Parameters
@@ -141,7 +143,7 @@ def create_full_pipeline_audit(image, results):
     touch_points = results.get("touch_points") or []
 
     # Final plotting: 4x4 grid
-    fig, axs = plt.subplots(4, 4, figsize=(20, 18))
+    fig, axs = plt.subplots(4, 4, figsize=(24, 18), constrained_layout=True)
     axs = axs.reshape(-1)
 
     # Row 1
@@ -312,6 +314,15 @@ def create_full_pipeline_audit(image, results):
 
     ax.text(0.01, 0.99, "\n".join(lines), va="top", ha="left", fontsize=9, family="monospace")
 
+    if save_path is not None:
+        output_path = Path(save_path)
+        if output_path.suffix == "":
+            image_name = Path(results.get("fname", "diagnostic")).stem or "diagnostic"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = output_path / f"{image_name}_{timestamp}_diag.png"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200, bbox_inches="tight")
+
     # Fail-soft red frame
     if not results.get('ok'):
         for a in axs:
@@ -319,5 +330,4 @@ def create_full_pipeline_audit(image, results):
                 spine.set_edgecolor('red')
                 spine.set_linewidth(2.0)
 
-    plt.tight_layout()
     return fig
