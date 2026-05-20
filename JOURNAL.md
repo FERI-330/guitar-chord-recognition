@@ -2,6 +2,60 @@
 
 ---
 
+## 🗓️ 2026-05-20 – Irány-agnosztikus előfeldolgozás bevezetése: automatikus tükrözés detektálás a bundtávolságok gradiense alapján
+
+### Motiváció
+
+A gitár lehet "standard" (Nut bal oldalt, jobbkezes játékos) vagy "tükrözött" (Nut jobb oldalt,
+balkezes vagy speciális tartás) állásban. Egy orientáció-érzékeny osztályozó a kétféle képet
+különböző osztályokba sorolhatta, megsokszorozva a szükséges tanítóadatot és rontva az általánosítást.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+- **`_derive_is_flipped(fit, orientation, landmarks) → bool`** — új helper:
+  1. **Elsődleges (bundtávolság-gradiens):** `fit["fit_direction"] == "reversed"` és `coverage ≥ 0.30`
+     → a bund-hálózat illesztési iránya alapján megbízható detektálás, ha a coverage elégséges.
+     `"reversed"` azt jelenti: a távolságok balról jobbra nőnek → Nut jobb oldalt van.
+  2. **Fallback:** `orientation["flip_logic"]` (az `detect_guitar_orientation` landmark-alapú becslése).
+  3. **Utolsó menedék:** nyers `wrist.x > index_mcp.x` feltétel a landmarks-ból.
+
+- **`run_v14_pipeline` kiegészítése** (fingertips számítása után):
+  - `out["is_flipped"]` — bool, True ha Nut jobb oldalt van.
+  - `out["canon_norm"]` — `cv2.flip(canon, 1)` ha `is_flipped`, egyébként `canon` referencia.
+    Ez az a kép, amelyet a CNN-nek kell átadni (mindig Nut-bal standardban).
+  - `out["nut_direction"]` — ember-olvasható string: `"Nut-Left (standard)"` / `"Nut-Right (flipped)"`.
+
+**`src/features.py`** — `assemble_feature_vector`
+
+- **Group B (42 dim):** ha `is_flipped`, az összes x-komponens előjele megfordul (`b[0::2] = -b[0::2]`).
+  A wrist-centrált koordinátáknál ez ekvivalens a kéz tükrözésével, így a modell
+  mindig ugyanolyan "standard" kézpózt lát.
+- **Group F (2 dim):** ha `is_flipped`, `f[1] = -f[1]` (a sin komponens negálva).
+  Vízszintes tükrözés után `sin(−α) = −sin(α)` — a nyak dőlésszög iránya megfordul.
+- **Group G + H (5+5 dim):** nem kell módosítani.
+  - `fret_est`: bund-sorszám — orientáció-agnosztikus (a 3. bund mindkét állásban a 3. bund).
+  - `string_norm`: y-koordináta — vízszintes tükrözés nem érinti.
+
+**`src/viz_diagnostics.py`**
+
+- `is_flipped`, `nut_direction`, `dir_arrow` ("← Nut" / "Nut →"), `dir_color` (zöld/narancs)
+  változók az audit-függvény tetején kerülnek kiszámításra.
+- `axs[12]` (Final Overlay): annotáció a kép bal/jobb sarkában a nyíllal, a cím tartalmazza `nut_direction`.
+- `axs[13]` (Canonical ROI): annotáció + a cím tartalmazza `dir_arrow`.
+- `axs[15]` (Summary): `── Irány ─────────────────────` blokk: nyíl, standard/tükrözött, `fit_direction`, `is_flipped`.
+
+### Architektúra-invariancia
+
+- A `canon` mező változatlan marad — minden meglévő adat (H, H_inv, fret_xs_filt, fingertips)
+  az eredeti koordinátarendszerben érvényes.
+- A `canon_norm` csak a CNN-inputhoz van szánva; a `features.py` a tükrözést a feature-vektorba
+  integrálja, nem a pipeline belső állapotára támaszkodik.
+- `is_flipped = False` alapértelmezés → a módosítás backward-compatible, meglévő ok=False eseteket nem érint.
+
+---
+
 ## 🗓️ 2026-05-20 – Inlay prototípus frissítése: ujj-maszkolás bevezetése a hamis pozitív detektálások elkerülése érdekében
 
 ### Motiváció

@@ -72,6 +72,39 @@ def _make_debug_info(stage: str, exc: Exception | str, **extra) -> dict:
     return info
 
 
+def _derive_is_flipped(fit: Optional[dict],
+                       orientation: Optional[dict],
+                       landmarks: Optional[list]) -> bool:
+    """Determines if the guitar is 'flipped' (nut on the right side of canonical image).
+
+    Primary evidence: fret spacing gradient from fit["fit_direction"].
+      fit_direction="reversed" → spacings increase left→right → nut is on the right.
+    Fallback: wrist-vs-index_mcp orientation from detect_guitar_orientation.
+    Last resort: raw landmark direction.
+
+    Returns True when the canonical image needs horizontal mirroring for standard
+    nut-left normalization.
+    """
+    # Primary: fit direction from fret spacing gradient (reliable when coverage ≥ 0.3)
+    if fit is not None:
+        direction = fit.get("fit_direction")
+        if direction in ("forward", "reversed") and float(fit.get("coverage_ratio", 0.0)) >= 0.30:
+            return direction == "reversed"
+
+    # Fallback: landmark-based orientation (flip_logic = side_hint == "right")
+    if orientation is not None:
+        return bool(orientation.get("flip_logic", False))
+
+    # Last resort: raw wrist vs index_mcp x-position
+    if landmarks is not None and len(landmarks) >= 6:
+        wrist_x = float(landmarks[0][0])
+        index_mcp_x = float(landmarks[5][0])
+        if abs(index_mcp_x - wrist_x) > 1e-6:
+            return index_mcp_x < wrist_x  # wrist further right → nut on right
+
+    return False
+
+
 def _global_hough_fallback(img: np.ndarray, edges: np.ndarray) -> list:
     """Permissive HoughLinesP when standard step2_hough finds nothing (no hand).
 
@@ -1052,6 +1085,14 @@ def run_v14_pipeline(img_entry: dict,
     except Exception as exc:
         out["fingertips"] = []
         out["debug_info"]["fingertips"] = _make_debug_info("fingertips", exc)
+
+    # Orientation normalization: detect if nut is on the right and flag for downstream use.
+    # canon_norm is the canonical image guaranteed to have the nut on the left;
+    # features.py mirrors x-coordinates when is_flipped=True.
+    is_flipped = _derive_is_flipped(out.get("fit"), orientation, landmarks)
+    out["is_flipped"] = is_flipped
+    out["canon_norm"] = cv2.flip(out["canon"], 1) if is_flipped else out["canon"]
+    out["nut_direction"] = "Nut-Right (flipped)" if is_flipped else "Nut-Left (standard)"
 
     out["ok"] = True
     return out
