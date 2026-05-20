@@ -6,6 +6,43 @@
 
 ---
 
+## 🗓️ 2026-05-20 – F1 Fázis Implementáció: Projekciós hiba elhárítása inverz transzformációval és maszkolási sorrend módosítása
+
+### Probléma
+
+A pipeline két szorosan összefüggő hibát tartalmazott:
+
+1. **Hand mask eltérés a kanonikus térben:** A `finger_mask` egyszer lett vetítve (a kezdeti `step6_warp` után), de a Nut-alapú trimmelés (`step6c_trim_to_nut`) és a shear-korrekció (`step6d_shear_correction`) után a `H` homográfia változott — a `hand_mask` viszont a régi H-val számított állapotban maradt. Ez azt eredményezte, hogy a kéz-maszk nem fedte pontosan az ujjak valódi kanonikus pozícióit.
+
+2. **Bund-detektálás az ujjakon:** Az `IntensityFretDetector` a teljes kanonikus képen számított Sobel/Max profilt, beleértve az ujjakat fedő oszlopokat is. A bund-csúcsok nem csupán a valódi bund-vonalakból, hanem az ujj-szélekből is keletkeztek, rontva a detektálási pontosságot.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+**1. `FretDetectorInterface.detect()` + mindkét implementáció:**
+- `hand_mask: Optional[np.ndarray] = None` paraméter hozzáadva az absztrakt interfészhez, `GeometricFretDetector`-hoz és `IntensityFretDetector`-hoz.
+
+**2. `IntensityFretDetector.detect()` – profil maszkolás:**
+- A `profile = np.nan_to_num(...)` sor után: `np.any(hand_mask > 0, axis=0)` alapján az ujj-területeket fedő oszlopokban a normalizált intenzitás-profil értéke `0.0`-ra áll.
+- A vizuális `canon_bgr` kép és az `out["canon"]` érintetlen marad (CNN számára).
+
+**3. `run_v14_pipeline()` – hand_mask pipeline-szinkronizáció:**
+- **Trim-to-nut után:** `step6c_trim_to_nut` + `step6_warp` (H2 kapott) után a `finger_mask` újra vetítődik H2-vel: `out["hand_mask"] = cv2.warpPerspective(fm, H2, ...)`.
+- **Shear-korrekció után:** Ha `shear["corrected"]`, a `hand_mask`-ra is alkalmazza az S mátrix affin részét (`cv2.warpAffine`), pontosan ugyanazzal a transzformációval, amivel `canon_corrected` készült. INTER_NEAREST + BORDER_CONSTANT=0 biztosítja a bináris maszk integritását.
+- **Detektor hívás:** Mindkét (elsődleges + fallback) `detect()` híváshoz `hand_mask=out.get("hand_mask")` átadva.
+
+**4. Bundok visszavetítése (`src/viz.py`):**
+- A `draw_fretboard_overlay()` már korábban (08b5df1 commit) pont-alapú inverz projekciót alkalmaz: `p1 = (fret_x, 0)`, `p2 = (fret_x, CANONICAL_H)`, `cv2.perspectiveTransform(pts, H_inv)`. Ez helyes és változatlan.
+
+### Architektúra-invariancia
+
+- A `GeometricFretDetector` `hand_mask`-t kap, de nem használja — backward compatible.
+- Shear-korrekció nélküli képeknél (`corrected=False`) a hand_mask-frissítés nem fut le — no-op.
+- A `canon` vizuális képe és az `intensity_profile` vizualizáció változatlan — csak a csúcskeresés szűrődik.
+
+---
+
 ## 🗓️ 2026-05-12 – EDA fázis (`01_EDA.ipynb`)
 
 ### Elvégzett műveletek

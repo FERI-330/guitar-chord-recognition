@@ -335,7 +335,8 @@ class FretDetectorInterface(ABC):
     @abstractmethod
     def detect(self, canon_bgr: np.ndarray,
                nut: Optional[dict] = None,
-               shear: Optional[dict] = None) -> dict:
+               shear: Optional[dict] = None,
+               hand_mask: Optional[np.ndarray] = None) -> dict:
         """Bundpozíciók detektálása a kanonikus képen.
 
         Args:
@@ -344,6 +345,8 @@ class FretDetectorInterface(ABC):
                        vagy ``None`` ha nem elérhető.
             shear:     step6d_shear_correction kimenete – az auto-mode dönti el
                        Sobel-X vs Max-pooling választást.
+            hand_mask: opcionális kanonikus kézmaszk (uint8) – az ujjak
+                       területe elnyomható a bund-detektálás során.
 
         Returns:
             Dict kötelező kulcsokkal: fit, fret_xs_raw, fret_xs_filt,
@@ -360,7 +363,8 @@ class GeometricFretDetector(FretDetectorInterface):
 
     def detect(self, canon_bgr: np.ndarray,
                nut: Optional[dict] = None,
-               shear: Optional[dict] = None) -> dict:
+               shear: Optional[dict] = None,
+               hand_mask: Optional[np.ndarray] = None) -> dict:
         try:
             fret_xs_raw = step7_fret_lines_canonical(canon_bgr)
             fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
@@ -537,7 +541,8 @@ class IntensityFretDetector(FretDetectorInterface):
 
     def detect(self, canon_bgr: np.ndarray,
                nut: Optional[dict] = None,
-               shear: Optional[dict] = None) -> dict:
+               shear: Optional[dict] = None,
+               hand_mask: Optional[np.ndarray] = None) -> dict:
         from scipy.signal import find_peaks
 
         debug_info = {}
@@ -553,6 +558,13 @@ class IntensityFretDetector(FretDetectorInterface):
             profile = self._dispatch_profile(gray, active_mode)
             profile = np.nan_to_num(profile, nan=0.0, posinf=0.0, neginf=0.0)
             raw_profile = np.nan_to_num(raw_profile, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Kézmaszk alapú elnyomás: ujj-területeken az intenzitás-profil 0-ra áll,
+            # hogy ott ne kerüljön bund-jelölt detektálásra. A vizuális canon kép érintetlen.
+            if hand_mask is not None:
+                col_has_hand = np.any(hand_mask > 0, axis=0)
+                if col_has_hand.shape[0] == profile.shape[0]:
+                    profile[col_has_hand] = 0.0
 
             # SNR-alapú fallback csak auto+sobel esetén: ha Sobel gyenge → Max-pooling
             if active_mode == "sobel" and self.mode == "auto":
@@ -949,6 +961,12 @@ def run_v14_pipeline(img_entry: dict,
             H2, H2_inv, canon2 = step6_warp(img, corners_trim)
             out["corners_trim"] = corners_trim
             out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
+            # Hand mask újra-vetítése az aktualizált homográfiával
+            fm = out.get("finger_mask")
+            if fm is not None:
+                Wc = int(CFG["canonical_w"])
+                Hc = int(CFG["canonical_h"])
+                out["hand_mask"] = cv2.warpPerspective(fm, H2, (Wc, Hc), flags=cv2.INTER_NEAREST)
         except Exception as exc:
             out["debug_info"]["trim_to_nut"] = _make_debug_info("trim_to_nut", exc)
 
@@ -972,6 +990,19 @@ def run_v14_pipeline(img_entry: dict,
         out["H"]     = shear["S"] @ out["H"]
         out["H_inv"] = out["H_inv"] @ shear["S_inv"]
         out["canon"] = shear["canon_corrected"]
+        # Hand mask shear-korrekciója: ugyanaz az affin transzformáció, mint a canon képen
+        if out.get("hand_mask") is not None:
+            try:
+                Wc = int(CFG["canonical_w"])
+                Hc = int(CFG["canonical_h"])
+                S_mat = np.asarray(shear["S"], dtype=np.float64)
+                M_affine_hm = S_mat[:2, :].astype(np.float32)
+                out["hand_mask"] = cv2.warpAffine(
+                    out["hand_mask"], M_affine_hm, (Wc, Hc),
+                    flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+                )
+            except Exception:
+                pass
         try:
             nut_post = step6b_find_nut(
                 out["canon"],
@@ -986,12 +1017,12 @@ def run_v14_pipeline(img_entry: dict,
 
     _detector = fret_detector if fret_detector is not None else _make_default_fret_detector()
     try:
-        det_result = _detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"))
+        det_result = _detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"), hand_mask=out.get("hand_mask"))
     except Exception as exc:
         out["debug_info"]["fret_detector"] = _make_debug_info("fret_detector", exc, detector=type(_detector).__name__)
         fallback_detector = GeometricFretDetector() if not isinstance(_detector, GeometricFretDetector) else IntensityFretDetector(mode="max")
         try:
-            det_result = fallback_detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"))
+            det_result = fallback_detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"), hand_mask=out.get("hand_mask"))
             out["debug_info"]["fret_detector_fallback"] = type(fallback_detector).__name__
         except Exception as exc2:
             out["fit"] = _make_empty_fit()
