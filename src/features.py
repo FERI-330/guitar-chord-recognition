@@ -13,6 +13,11 @@ Feature vektor (56 dim):
 Failed detection policy:
   ok=False → Group B megmarad (ha landmarks nem None), G/H=0, D=(hand,0), F=0
   landmarks=None → minden 0
+
+F3 – Irány-agnosztikus, relatív koordinátájú ML pipeline:
+  compute_rel_fingertip_positions() – rel_fret_x (0-1 bunden belüli pozíció),
+                                       rel_string_y (0-1 ROI magassági pozíció)
+  get_ml_ready_payload()             – CNN-kész kép + normalizált ujjpozíciók + metaadatok
 """
 from __future__ import annotations
 
@@ -23,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import CFG, PATHS
-from src.constants import CANONICAL_H, N_FRETS, FINGER_TIP_IDX
+from src.constants import CANONICAL_W, CANONICAL_H, N_FRETS, FINGER_TIP_IDX
 
 # ── Feature csoport méretek ────────────────────────────────────────────────
 GROUP_B_SIZE = 42   # wrist-centered x,y (21 landmark × 2)
@@ -138,6 +143,143 @@ def assemble_feature_vector(result: dict) -> np.ndarray:
         vec[_OFF_H:] = h
 
     return vec
+
+
+_FINGER_NAMES: dict[int, str] = {4: "thumb", 8: "index", 12: "middle", 16: "ring", 20: "pinky"}
+
+
+def _compute_rel_fret_x(cx_norm: float, pred_norm: dict) -> Optional[float]:
+    """Bunden-belüli pozíció (0-1) a normalizált kanonikus térben.
+
+    0.0 = pontosan a nut-oldali bund felett, 1.0 = a következő (test-oldali) bund felett.
+    A `pred_norm` x-értékek növekvők (nut bal oldalt).
+    A `cx_norm` a tükrözött kanonikus x-koordináta (`CANONICAL_W - cx` ha `is_flipped`).
+    """
+    if not pred_norm:
+        return None
+    sorted_frets = sorted(pred_norm.items(), key=lambda kv: kv[1])
+    for i in range(len(sorted_frets) - 1):
+        _, x_lo = sorted_frets[i]
+        _, x_hi = sorted_frets[i + 1]
+        if x_lo <= cx_norm <= x_hi:
+            denom = x_hi - x_lo
+            return float(np.clip((cx_norm - x_lo) / max(denom, 1e-3), 0.0, 1.0))
+    # Extrapolate: clamp to range edge
+    return 0.0 if cx_norm < sorted_frets[0][1] else 1.0
+
+
+def compute_rel_fingertip_positions(fingertips: list,
+                                    fit: dict,
+                                    is_flipped: bool) -> list[dict]:
+    """Relatív ujjhegy-pozíciók számítása, irány-agnosztikusan.
+
+    Minden detektált ujjhegyre kiszámítja:
+      rel_fret_x  : 0.0 (nut-oldali bund) – 1.0 (test-oldali bund). Mindig a
+                    nut-bal konvenciót követi, `is_flipped` figyelembevételével.
+      rel_string_y: 0.0 (ROI teteje) – 1.0 (ROI alja). Vízszintes tükrözéstől független.
+
+    Args:
+        fingertips:  `step9_project_fingertips` visszatérési értéke.
+        fit:         `step8_fit_fret_rule` kimenet (predicted_x dict szükséges).
+        is_flipped:  True ha a kanonikus kép nut-jobb állásban van.
+
+    Returns:
+        list[dict] per finger:
+          { tip_idx, finger_name, canon_x, rel_fret_x, rel_string_y,
+            fret_est, confidence }
+    """
+    pred_x: dict = (fit or {}).get("predicted_x", {})
+    w = float(CANONICAL_W)
+
+    # Ha flipped, tükrözd a predicted_x-et és a canon_x-et is a számításhoz
+    if is_flipped:
+        pred_norm = {n: w - float(x) for n, x in pred_x.items()}
+    else:
+        pred_norm = {n: float(x) for n, x in pred_x.items()}
+
+    result = []
+    for fp in fingertips:
+        tip_idx = fp.get("tip_idx")
+        cx = fp.get("canon_x")
+        cy = fp.get("canon_y")
+        fret_est = fp.get("fret_est")
+        str_norm = float(fp.get("string_norm", 0.0))
+
+        if cx is None or cy is None:
+            continue
+
+        cx_norm = (w - float(cx)) if is_flipped else float(cx)
+
+        rel_fret = _compute_rel_fret_x(cx_norm, pred_norm)
+        confidence = 1.0 if (rel_fret is not None and fret_est is not None) else 0.5
+
+        result.append({
+            "tip_idx": tip_idx,
+            "finger_name": _FINGER_NAMES.get(tip_idx, f"lm{tip_idx}"),
+            "canon_x": float(cx),
+            "rel_fret_x": float(rel_fret) if rel_fret is not None else None,
+            "rel_string_y": float(str_norm),
+            "fret_est": fret_est,
+            "confidence": confidence,
+        })
+    return result
+
+
+def get_ml_ready_payload(result: dict,
+                         target_size: tuple[int, int] = (224, 224)) -> dict:
+    """CNN-kész kép + normalizált ujjpozíciók + metaadatok összeállítása.
+
+    A `canon_norm` képet (always nut-left) átméretezi `target_size`-ra,
+    RGB float32 [0, 1] tartományba konvertálja.
+
+    Args:
+        result:      `run_v14_pipeline()` visszatérési értéke.
+        target_size: (W, H) célméret. Alapértelmezés: (224, 224).
+
+    Returns:
+        {
+          "image":        np.ndarray (H, W, 3) float32 [0, 1], RGB csatornasorrend,
+          "image_shape":  (H, W),
+          "feature_vec":  np.ndarray (56,) float32, normalizált feature vektor,
+          "fingers":      list[dict] – compute_rel_fingertip_positions kimenete,
+          "is_flipped":   bool,
+          "coverage":     float,
+          "ok":           bool,
+          "class":        str | None,
+        }
+    """
+    import cv2 as _cv2
+
+    ok = bool(result.get("ok", False))
+    is_flipped = bool(result.get("is_flipped", False))
+    fit = result.get("fit") or {}
+
+    # ── Kép normalizálás ───────────────────────────────────────────────────────
+    canon_norm = result.get("canon_norm")
+    if canon_norm is None:
+        canon_norm = result.get("canon")
+    if canon_norm is not None:
+        tw, th = int(target_size[0]), int(target_size[1])
+        img_resized = _cv2.resize(canon_norm, (tw, th), interpolation=_cv2.INTER_AREA)
+        img_rgb = _cv2.cvtColor(img_resized, _cv2.COLOR_BGR2RGB)
+        image = img_rgb.astype(np.float32) / 255.0
+    else:
+        image = np.zeros((target_size[1], target_size[0], 3), dtype=np.float32)
+
+    # ── Relatív ujjpozíciók ────────────────────────────────────────────────────
+    fingertips = result.get("fingertips") or []
+    fingers = compute_rel_fingertip_positions(fingertips, fit, is_flipped) if ok else []
+
+    return {
+        "image":        image,
+        "image_shape":  (image.shape[0], image.shape[1]),
+        "feature_vec":  assemble_feature_vector(result),
+        "fingers":      fingers,
+        "is_flipped":   is_flipped,
+        "coverage":     float(fit.get("coverage_ratio", 0.0)),
+        "ok":           ok,
+        "class":        result.get("class"),
+    }
 
 
 def feature_names() -> list[str]:

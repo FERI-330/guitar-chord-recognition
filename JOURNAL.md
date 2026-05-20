@@ -2,6 +2,54 @@
 
 ---
 
+## 🗓️ 2026-05-20 – F3 Fázis kész: Irány-agnosztikus, relatív koordinátákon alapuló ML pipeline aktiválva
+
+### Motiváció
+
+Az F1 (geometria + kanonikus ROI), F2 (nut-mentes bund-detektálás) és az orientáció-normalizálás
+(auto-flip) után az utolsó lépés a teljes ML-kész kimenet összeállítása, amely:
+- Minden ujjra relatív, interpretálható koordinátákat ad (nem pixel, hanem bund-közi és ROI-relatív 0-1 értékek).
+- A CNN-nek mindig standard (Nut-bal) képet ad, átméretezve a célméretre.
+- Egyetlen `get_ml_ready_payload(result)` hívással elérhető a teljes ML-csomag.
+
+### Elvégzett változtatások
+
+**`src/features.py`**
+
+1. **`_compute_rel_fret_x(cx_norm, pred_norm) → float | None`** — tiszta helper:
+   - A normalizált kanonikus x-koordinátát (esetleg már tükrözöttet) a `predicted_x` bund-hálózat
+     szomszédos pozíciói közé interpolálja.
+   - Ha a fingertip a látható bund-tartományon kívül esik: 0.0 (nut-oldalon kívül) vagy 1.0 (test-oldalon).
+   - Mindig a **nut-bal** konvenciót feltételezi (az `is_flipped` korrekció előtte fut).
+
+2. **`compute_rel_fingertip_positions(fingertips, fit, is_flipped) → list[dict]`** — exportált:
+   - `pred_norm`: ha `is_flipped`, `predicted_x` x-értékeit tükrözi (`W − x`), ugyanígy a `canon_x`-et.
+   - Per-ujj kimenet: `tip_idx, finger_name, canon_x, rel_fret_x, rel_string_y, fret_est, confidence`.
+   - `rel_fret_x`: 0.0–1.0 bunden-belüli pozíció, nut-bal konvencióban.
+   - `rel_string_y`: `string_norm` alias — vízszintes tükrözéstől független (y-tengely).
+   - `confidence`: 1.0 ha `rel_fret_x` és `fret_est` is elérhető, egyébként 0.5.
+
+3. **`get_ml_ready_payload(result, target_size=(224,224)) → dict`** — fő export:
+   - `image`: `canon_norm` → `cv2.resize` → `BGR2RGB` → `float32 / 255.0` — (H, W, 3).
+   - `feature_vec`: `assemble_feature_vector(result)` — teljes 56-dim vektor.
+   - `fingers`: `compute_rel_fingertip_positions(...)` kimenete.
+   - `is_flipped`, `coverage`, `ok`, `class` metaadatok.
+   - Ha `canon_norm` nem elérhető: (H,W,3) nulla tensor (biztonságos fallback).
+
+4. **`_FINGER_NAMES`** dict (`{4: "thumb", 8: "index", ...}`) a `features.py`-ba kerül,
+   hogy a payload `finger_name` mező ne függjön külső moduloktól.
+
+5. **Modul docstring** frissítve: F3 fázis leírása.
+
+### Invarianciák
+
+- `get_ml_ready_payload` backward-compatible: `result.get("canon_norm") or result.get("canon")`
+  fallback — régi pipeline-eredményekkel is működik.
+- `compute_rel_fingertip_positions` `ok=False` pipeline-eredményen üres listát ad vissza.
+- `_compute_rel_fret_x` határon kívüli esetben is mindig float-ot ad vissza, nem dob kivételt.
+
+---
+
 ## 🗓️ 2026-05-20 – Irány-agnosztikus előfeldolgozás bevezetése: automatikus tükrözés detektálás a bundtávolságok gradiense alapján
 
 ### Motiváció
