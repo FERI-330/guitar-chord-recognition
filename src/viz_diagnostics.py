@@ -105,6 +105,11 @@ def create_full_pipeline_audit(image, results, save_path=None):
         # fallback to full image
         roi = (0, 0, img_bgr.shape[1], img_bgr.shape[0])
 
+    x, y, w, h = roi
+    roi_gray = gray[max(0, y):max(0, y + h), max(0, x):max(0, x + w)]
+    if roi_gray.size == 0:
+        roi_gray = gray
+
     # Canonical ROI image if available (used for mask/size alignment)
     canon_img = results.get("canon")
 
@@ -125,6 +130,12 @@ def create_full_pipeline_audit(image, results, save_path=None):
             mmax = float(mask.max()) if mask.size > 0 else 0.0
         except Exception:
             mmax = 0.0
+        if mask.dtype == np.bool_:
+            mask = (mask.astype(np.uint8) * 255).astype(np.uint8)
+            mmax = float(mask.max()) if mask.size > 0 else 0.0
+        elif np.issubdtype(mask.dtype, np.integer) and mmax <= 1.1:
+            mask = (mask.astype(np.uint8) * 255).astype(np.uint8)
+            mmax = float(mask.max()) if mask.size > 0 else 0.0
         if mask.dtype != np.uint8:
             if mmax <= 1.1:
                 mask = (mask.astype(np.float32) * 255.0).astype(np.uint8)
@@ -159,9 +170,32 @@ def create_full_pipeline_audit(image, results, save_path=None):
 
         return mask_roi
 
+    def _raw_profile_from_img(target_img):
+        if target_img is None:
+            return None
+        try:
+            raw_gray = _safe_gray(target_img)
+            if raw_gray is None:
+                return None
+            raw_profile = raw_gray.mean(axis=0).astype(np.float32)
+            if raw_profile.size == 0:
+                return None
+            raw_profile = np.nan_to_num(raw_profile, nan=0.0, posinf=0.0, neginf=0.0)
+            raw_max = float(raw_profile.max())
+            if raw_max > 1e-6:
+                raw_profile = raw_profile / raw_max
+            return raw_profile
+        except Exception:
+            return None
+
     # Prepare visualizable masks (in canonical ROI coords if possible)
     hand_mask_vis = _prepare_mask(hand_mask, roi, target_img=canon_img)
     neck_mask_vis = _prepare_mask(neck_mask, roi, target_img=canon_img)
+    hand_mask_empty = False
+    try:
+        hand_mask_empty = np.count_nonzero(hand_mask_vis) == 0
+    except Exception:
+        hand_mask_empty = False
 
     # Debug: mask stats
     try:
@@ -188,6 +222,8 @@ def create_full_pipeline_audit(image, results, save_path=None):
     profile_raw = results.get("profile_raw")
     if profile_raw is None:
         profile_raw = results.get("raw_profile")
+    if profile_raw is None:
+        profile_raw = _raw_profile_from_img(canon_img if canon_img is not None else img_bgr)
     # prefer profile from results; if missing or empty, compute from canonical ROI
     if profile is None:
         if canon_img is not None:
@@ -217,7 +253,7 @@ def create_full_pipeline_audit(image, results, save_path=None):
 
     # Debug: ROI mean intensity
     try:
-        print(f"DEBUG: ROI mean intensity: {float(np.mean(gray))}")
+        print(f"DEBUG: ROI mean intensity: {float(np.mean(roi_gray))}")
     except Exception:
         print("DEBUG: ROI mean intensity: None")
 
@@ -291,8 +327,8 @@ def create_full_pipeline_audit(image, results, save_path=None):
     def _draw_handmask():
         if canon_img is not None and hand_mask_vis is not None:
             ax.imshow(hand_mask_vis, cmap="gray")
-            if np.count_nonzero(hand_mask_vis) == 0 and landmarks is not None:
-                ax.set_title("Mask Empty (Check Warp!)")
+            if hand_mask_empty and landmarks is not None:
+                ax.set_title("Mask Empty (Warp Error?)")
             else:
                 ax.set_title("Hand mask (canonical ROI)")
         else:
@@ -350,7 +386,7 @@ def create_full_pipeline_audit(image, results, save_path=None):
         xs = np.arange(len(profile))
         ax.plot(xs, profile, color="steelblue")
         ax.fill_between(xs, profile, alpha=0.15)
-        if profile_raw is not None and profile_raw is not profile:
+        if profile_raw is not None:
             xs_raw = np.arange(len(profile_raw))
             ax.plot(xs_raw, profile_raw, color="steelblue", alpha=0.3, lw=1.0)
         ax.relim()
