@@ -2,6 +2,58 @@
 
 ---
 
+## 🗓️ 2026-05-20 – Hough fallback stabilizálása: szög-alapú szűrés bevezetése a 90 fokkal elforgatott ROI-k elkerülésére
+
+### Motiváció
+
+A `_global_hough_fallback` az előző munkamenetben csak ±15°-os szög-küszöbbel futott.
+Ez két problémát okozott:
+1. Enyhén dőlt gitárnyakokat (15–30°) nem talált meg → kevés fallback sor → sikertelen trapézoid.
+2. A fallback vonalak **nem kerültek be `out["lines"]`-ba** → a visualizáció üres Hough panelt mutatott.
+3. A `roi_min_height` fallback `perp=[0,1]` iránya potenciálisan 90°-os ROI-t hozhatott létre.
+4. A trapézoid orientáció egyáltalán nem volt ellenőrizve warp előtt.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+1. **`_global_hough_fallback` újraírva** — kétlépéses stratégia:
+   - `_MAX_ANGLE = 30.0` (volt: 15.0) — enyhén dőlt nyakak is detektálhatók.
+   - Belső `_extract_horiz()` helper: szétválasztja a horizontális (≤30°) és vertikális (>30°) vonalakat.
+   - **1. lépés**: standard paraméterek (`threshold=20, minLen=w//5`).
+   - **2. lépés** (ha `len(horiz) < 2` VAGY `len(vert) > len(horiz)`): lazított paraméterek
+     (`threshold=12, minLen=w//8`), de még mindig csak horizontális szűrővel.
+   - Visszaad: hossz szerint rendezett horizontális vonalak listája.
+
+2. **`out["lines"]` bug javítva**: fallback sikeres futásakor `out["lines"] = lines` is frissül
+   → visualizáló panel [7] most már látja a fallback vonalakat.
+
+3. **`roi_min_height` guard** — `perp_is_fallback` flag:
+   - Ha `edge_info is None`, a fallback `perp=[0,1]` csak akkor alkalmazza a kiterjtést,
+     ha az eredmény trapézoid NEM lesz magasabb mint széles (`exp_h ≤ exp_w`).
+   - Ha a feltétel sérülne: `SKIP: vertical_fallback_would_invert` üzenet + `debug_info` bejegyzés.
+   - A kiterjtés logikája `new_corners` átmeneti változóval fut — az eredeti `corners` érintetlen marad.
+
+4. **Trapézoid orientáció guard** (új blokk, sanity check és warp között):
+   - `_trap_h > _trap_w` → `invalid_reason = "trap_orientation: h(X)>w(Y)"` + `return out`.
+   - `out["debug_info"]["trap_orientation"]` mindig tartalmazza a `trap_w` / `trap_h` értékeket.
+
+**`src/viz_diagnostics.py`**
+
+5. **Panel [7] Hough + Nyak** — fallback mód vizuális megkülönböztetés:
+   - `is_fallback = debug_info["hough"]["fallback"] == "global_hough_no_hand"`.
+   - Fallback vonalak: zöld (`#00cc88`) ha ≤10°, narancssárga (`#f39c12`) ha 10-30°, vastagabb (`lw=2.0`).
+   - Normál vonalak: meglévő `_angle_color` + `lw=1.0`.
+   - Fallback esetén jelmagyarázat + narancssárga panel cím `[FALLBACK]` taggel.
+
+### Architektúra-invariancia
+
+- `_global_hough_fallback` visszatérési formátuma változatlan (`list[(x1,y1,x2,y2)]`).
+- `out["lines"]` most már fallback esetén is tartalmazza az adatokat.
+- Az orientáció guard egy **blokkolt return** — csak a nyilvánvalóan 90°-os eseteket ejti el.
+
+---
+
 ## 🗓️ 2026-05-20 – A blokkoló aspect ratio ellenőrzés átalakítása figyelmeztetéssé a No Hand esetek támogatásához
 
 ### Motiváció
