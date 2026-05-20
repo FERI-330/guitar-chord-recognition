@@ -6,8 +6,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from src.config import CFG
+
 
 FINGER_TIP_INDEX = {
+    "thumb": 4,
     "index": 8,
     "middle": 12,
     "ring": 16,
@@ -15,11 +18,38 @@ FINGER_TIP_INDEX = {
 }
 
 FINGER_LABEL_HU = {
+    "thumb": "Hüvelykujj",
     "index": "Mutatóujj",
     "middle": "Középső",
     "ring": "Gyűrűs",
     "pinky": "Kisujj",
 }
+
+_DEFAULT_TOUCH_POINT_OFFSET_RATIO = float(CFG.get("touch_point_offset_ratio", 0.025))
+
+
+def _resolve_touch_point_offset_px(
+    touch_point_offset_ratio: Optional[float],
+    touch_point_offset_px: Optional[float],
+    canon_height: Optional[float],
+) -> float:
+    """Resolve the vertical touch-point offset in canonical pixels."""
+    if touch_point_offset_px is not None:
+        try:
+            return max(0.0, float(touch_point_offset_px))
+        except Exception:
+            return 0.0
+
+    ratio = _DEFAULT_TOUCH_POINT_OFFSET_RATIO if touch_point_offset_ratio is None else touch_point_offset_ratio
+    try:
+        ratio_value = max(0.0, float(ratio))
+    except Exception:
+        ratio_value = _DEFAULT_TOUCH_POINT_OFFSET_RATIO
+
+    if canon_height is None:
+        return 0.0
+
+    return max(0.0, float(canon_height) * ratio_value)
 
 
 def _as_point_array(mp_results: Any, img_shape: Optional[Tuple[int, int]] = None) -> Optional[np.ndarray]:
@@ -137,17 +167,20 @@ def _finger_fret_from_x(x: float, nut_x: Optional[float], fret_xs: Sequence[floa
 def map_fingers_to_frets(mp_results: Any, detection_results: Mapping[str, Any]) -> Dict[str, Any]:
     """Map MediaPipe fingertip positions to the detected fret intervals.
 
-    Returns a dict with keys `index`, `middle`, `ring`, `pinky`.
+    Returns a dict with keys `thumb`, `index`, `middle`, `ring`, `pinky`.
     Each value contains:
     - `fret`: integer fret number or `OUT`
-    - `canon_xy`: projected fingertip position in canonical ROI coordinates
+    - `canon_xy`: projected touch-point position in canonical ROI coordinates
+    - `tip_xy`: raw projected fingertip position before offset correction
+    - `touch_xy`: offset-corrected touch-point position used for fret lookup
     - `label`: Hungarian finger label
     """
     img = detection_results.get("img")
     canon = detection_results.get("canon")
     canon_shape = canon.shape if getattr(canon, "shape", None) is not None else None
+    img_shape = getattr(img, "shape", None)
 
-    points_px = _as_point_array(mp_results, img_shape=getattr(img, "shape", None))
+    points_px = _as_point_array(mp_results, img_shape=img_shape)
     if points_px is None:
         fingertips = detection_results.get("fingertips")
         if fingertips is not None:
@@ -155,13 +188,28 @@ def map_fingers_to_frets(mp_results: Any, detection_results: Mapping[str, Any]) 
 
     if points_px is None:
         return {
-            name: {"fret": "OUT", "canon_xy": None, "label": FINGER_LABEL_HU[name]}
+            name: {"fret": "OUT", "canon_xy": None, "tip_xy": None, "touch_xy": None, "label": FINGER_LABEL_HU[name]}
             for name in FINGER_TIP_INDEX
         }
 
-    canon_points = _to_canonical(points_px, detection_results)
+    touch_point_offset_px = _resolve_touch_point_offset_px(
+        detection_results.get("touch_point_offset_ratio"),
+        detection_results.get("touch_point_offset_px"),
+        float(img_shape[0]) if img_shape is not None else (float(canon_shape[0]) if canon_shape is not None else None),
+    )
+
+    touch_points_px = np.array(points_px, dtype=np.float32, copy=True)
+    for tip_idx in FINGER_TIP_INDEX.values():
+        if 0 <= tip_idx < len(touch_points_px):
+            touch_points_px[tip_idx, 1] += touch_point_offset_px
+
+    tip_canon_points = _to_canonical(points_px, detection_results)
+    if tip_canon_points is None:
+        tip_canon_points = points_px
+
+    canon_points = _to_canonical(touch_points_px, detection_results)
     if canon_points is None:
-        canon_points = points_px
+        canon_points = touch_points_px
 
     fret_xs = _normalize_fret_xs(detection_results)
 
@@ -184,24 +232,39 @@ def map_fingers_to_frets(mp_results: Any, detection_results: Mapping[str, Any]) 
             result[finger_name] = {
                 "fret": "OUT",
                 "canon_xy": None,
+                "tip_xy": None,
+                "touch_xy": None,
+                "touch_offset_px": touch_point_offset_px,
                 "label": FINGER_LABEL_HU[finger_name],
             }
             continue
 
-        x = float(canon_points[landmark_idx, 0])
-        y = float(canon_points[landmark_idx, 1])
-        canon_xy = (x, y)
+        tip_x = float(tip_canon_points[landmark_idx, 0])
+        tip_y = float(tip_canon_points[landmark_idx, 1])
+        touch_x = tip_x
+        touch_y = tip_y + touch_point_offset_px
 
-        if math.isnan(x) or math.isnan(y):
+        if height is not None:
+            touch_y = min(max(0.0, touch_y), float(height) - 1.0)
+        if width is not None:
+            touch_x = min(max(0.0, touch_x), float(width) - 1.0)
+
+        tip_xy = (tip_x, tip_y)
+        touch_xy = (touch_x, touch_y)
+
+        if math.isnan(tip_x) or math.isnan(tip_y):
             fret_value: Any = "OUT"
-        elif width is not None and height is not None and not (0.0 <= x < width and 0.0 <= y < height):
+        elif width is not None and height is not None and not (0.0 <= touch_x < width and 0.0 <= touch_y < height):
             fret_value = "OUT"
         else:
-            fret_value = _finger_fret_from_x(x, nut_x, fret_xs)
+            fret_value = _finger_fret_from_x(touch_x, nut_x, fret_xs)
 
         result[finger_name] = {
             "fret": fret_value,
-            "canon_xy": canon_xy,
+            "canon_xy": touch_xy,
+            "tip_xy": tip_xy,
+            "touch_xy": touch_xy,
+            "touch_offset_px": touch_point_offset_px,
             "label": FINGER_LABEL_HU[finger_name],
         }
 
@@ -209,5 +272,7 @@ def map_fingers_to_frets(mp_results: Any, detection_results: Mapping[str, Any]) 
         "fret_xs": fret_xs,
         "nut_x": nut_x,
         "canon_shape": canon_shape,
+        "touch_point_offset_px": touch_point_offset_px,
+        "touch_point_offset_ratio": detection_results.get("touch_point_offset_ratio", _DEFAULT_TOUCH_POINT_OFFSET_RATIO),
     }
     return result

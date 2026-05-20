@@ -64,6 +64,8 @@ CFG: dict = {
     "nut_min_width_px": 5.0,           # minimális FWHM px, ami nut-ra utal
     "nut_max_width_px": 24.0,          # maximális FWHM px (ujj kizárása); None = nincs felső korlát
     "nut_n_candidates": 5,              # top-N csúcs vizsgálata (argmax helyett)
+    # ── Ujjbegy érintési pont korrekció ─────────────────────────────────────
+    "touch_point_offset_ratio": 0.025,  # TIP → ujjbegy közepe felé tolt vertikális offset
     # ── Kéz-határvezérelt Nut-keresési sáv ──────────────────────────────────
     "hand_boundary_enabled": True,      # landmark-alapú keresési sáv korlátozás
     "nut_hand_margin_px": 10,           # biztonsági margó a kézél előtt (canon px)
