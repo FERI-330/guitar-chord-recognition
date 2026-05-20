@@ -257,10 +257,20 @@ def create_full_pipeline_audit(image, results, save_path=None):
     # [3] Warped ROI — hand visible (F1: raw image warped, not masked)
     ax = axs[3]
     def _draw_warped_roi():
+        trap_ok_flag = bool(results.get("trap_ok", True))
+        trap_reasons = results.get("trap_reasons") or []
         if canon is not None:
             ax.imshow(cv2.cvtColor(canon, cv2.COLOR_BGR2RGB), aspect="auto")
-            ax.set_title(f"Warped ROI (kézzel, F1)  {canon.shape[1]}×{canon.shape[0]}px",
-                         fontsize=9)
+            if not trap_ok_flag:
+                reasons_str = ", ".join(trap_reasons)
+                ax.text(0.5, 0.04, f"⚠ Gyenge trapéz: {reasons_str}",
+                        ha="center", va="bottom", transform=ax.transAxes,
+                        fontsize=6, color="orange", fontweight="bold",
+                        bbox=dict(facecolor="black", alpha=0.55, pad=2, boxstyle="round"))
+            title = (f"Warped ROI (F1)  {canon.shape[1]}×{canon.shape[0]}px"
+                     + (" ⚠" if not trap_ok_flag else ""))
+            ax.set_title(title, fontsize=9,
+                         color="orange" if not trap_ok_flag else "black")
         else:
             ax.set_facecolor("#f8e8e8")
             reason = results.get("invalid_reason", "n/a")
@@ -384,7 +394,10 @@ def create_full_pipeline_audit(image, results, save_path=None):
             sx_abs = sx_abs / mx
         ax.imshow(sx_abs, cmap="inferno", aspect="auto",
                   vmin=0.0, vmax=1.0)
-        ax.set_title("Sobel-X Gradient (canonical)", fontsize=9)
+        trap_ok_flag = bool(results.get("trap_ok", True))
+        title = "Sobel-X Gradient (canonical)" + (" ⚠ bizonytalan" if not trap_ok_flag else "")
+        ax.set_title(title, fontsize=9,
+                     color="orange" if not trap_ok_flag else "black")
 
     _safe_draw(ax, _draw_sobel_canon, fallback_msg="Sobel unavailable")
 

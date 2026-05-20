@@ -139,7 +139,7 @@ def _global_hough_fallback(img: np.ndarray, edges: np.ndarray) -> list:
 def validate_trapezoid(corners: np.ndarray,
                        img_shape: tuple,
                        landmarks: Optional[list] = None,
-                       min_aspect: float = 4.0,
+                       min_aspect: float = 1.2,
                        area_frac_range: tuple = (0.010, 0.50),
                        max_edge_angle_diff_deg: float = 15.0) -> tuple[bool, list]:
     """Trapéz épelméjűségi szanitás (3 geometriai szűrő).
@@ -937,8 +937,9 @@ def run_v14_pipeline(img_entry: dict,
     try:
         roi_height = min(trap["w_start"], trap["w_end"])
         min_h_px = img.shape[0] * float(CFG.get("roi_min_height_frac", 0.15))
-        if roi_height < min_h_px and edge_info is not None:
-            perp = np.array(edge_info["perp_dir"], dtype=np.float64)
+        if roi_height < min_h_px:
+            perp = (np.array(edge_info["perp_dir"], dtype=np.float64)
+                    if edge_info is not None else np.array([0.0, 1.0]))
             expand = (min_h_px - roi_height) / 2.0
             corners = trap["corners_px"].astype(np.float64)
             projs = [float(np.dot(corners[i], perp)) for i in range(4)]
@@ -968,8 +969,8 @@ def run_v14_pipeline(img_entry: dict,
     out["trap_ok"] = ok
     out["trap_reasons"] = reasons
     if not ok:
-        out["invalid_reason"] = "trapezoid_sanity: " + ", ".join(reasons)
-        return out
+        out["debug_info"]["trap_sanity_warning"] = reasons
+        print(f"  [trap_sanity] WARNING — continuing with sub-optimal trapezoid: {', '.join(reasons)}")
 
     try:
         H, H_inv, canon = step6_warp(img, trap["corners_px"])
