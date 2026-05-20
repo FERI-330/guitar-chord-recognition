@@ -359,18 +359,34 @@ def create_full_pipeline_audit(image, results, save_path=None):
     ax = axs[7]
     def _draw_hough():
         ax.imshow(img_rgb)
+        _hough_debug = (results.get("debug_info") or {}).get("hough") or {}
+        is_fallback = _hough_debug.get("fallback") == "global_hough_no_hand"
         if lines_raw:
-            for ln in lines_raw:
+            for i, ln in enumerate(lines_raw):
                 x1, y1, x2, y2 = ln
                 ang = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
-                ax.plot([x1, x2], [y1, y2], color=_angle_color(ang), lw=1.0, alpha=0.7)
+                if is_fallback:
+                    abs_ang = abs(ang) if abs(ang) <= 90 else 180.0 - abs(ang)
+                    color = "#00cc88" if abs_ang <= 10 else "#f39c12"
+                    lw, alpha = 2.0, 0.9
+                    if i == 0:
+                        ax.plot([], [], color="#00cc88", lw=2, label="fallback ≤10°")
+                        ax.plot([], [], color="#f39c12", lw=2, label="fallback 10-30°")
+                else:
+                    color = _angle_color(ang)
+                    lw, alpha = 1.0, 0.7
+                ax.plot([x1, x2], [y1, y2], color=color, lw=lw, alpha=alpha)
+        if is_fallback:
+            ax.legend(fontsize=6, loc="upper right", framealpha=0.7)
         ang_deg = float(neck.get("angle_deg", 0.0))
         n_long  = len((results.get("split") or {}).get("long_lines") or [])
         n_fret  = len((results.get("split") or {}).get("fret_lines") or [])
+        fallback_tag = "  [FALLBACK]" if is_fallback else ""
         ax.set_title(
             f"Hough + Nyak  angle={ang_deg:.1f}°  "
-            f"long={n_long}  fret_lines={n_fret}",
+            f"long={n_long}  fret_lines={n_fret}{fallback_tag}",
             fontsize=9,
+            color="#e67e22" if is_fallback else "black",
         )
 
     _safe_draw(ax, _draw_hough, fallback_msg="Hough unavailable")

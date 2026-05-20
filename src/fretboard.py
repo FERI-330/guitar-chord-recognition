@@ -108,28 +108,51 @@ def _derive_is_flipped(fit: Optional[dict],
 def _global_hough_fallback(img: np.ndarray, edges: np.ndarray) -> list:
     """Permissive HoughLinesP when standard step2_hough finds nothing (no hand).
 
-    Finds near-horizontal lines (|angle| ≤ 15°) sorted by length descending.
-    Returns same format as step2_hough: list of (x1, y1, x2, y2) tuples.
+    Two-pass strategy — accepts lines up to ±30° from horizontal:
+    Pass 1: standard permissive params (threshold=20, minLen=w//5).
+    Pass 2 (triggered when majority of raw lines are vertical, or < 2 horizontal
+            lines found): relax Hough params but keep the ≤30° horizontal filter.
+    Vertical lines (angle > 30°) are always rejected.
+
+    Returns same format as step2_hough: list of (x1, y1, x2, y2) tuples,
+    sorted by length descending.
     """
-    h, w = edges.shape[:2]
-    min_len = max(w // 5, 60)
-    raw = cv2.HoughLinesP(
-        edges, rho=1, theta=np.pi / 180,
-        threshold=20, minLineLength=min_len, maxLineGap=30,
-    )
-    if raw is None:
-        return []
-    result = []
-    for ln in raw:
-        x1, y1, x2, y2 = int(ln[0][0]), int(ln[0][1]), int(ln[0][2]), int(ln[0][3])
-        angle = abs(float(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
-        if angle > 90.0:
-            angle = 180.0 - angle
-        if angle <= 15.0:
+    _MAX_ANGLE = 30.0  # raised from 15° — allows slightly tilted guitar necks
+
+    def _extract_horiz(raw):
+        """Split raw HoughLinesP output into horizontal (≤30°) and vertical (>30°)."""
+        if raw is None:
+            return [], []
+        horiz, vert = [], []
+        for ln in raw:
+            x1, y1, x2, y2 = int(ln[0][0]), int(ln[0][1]), int(ln[0][2]), int(ln[0][3])
+            a = abs(float(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
+            if a > 90.0:
+                a = 180.0 - a
             length = float(np.hypot(x2 - x1, y2 - y1))
-            result.append((length, (x1, y1, x2, y2)))
-    result.sort(key=lambda p: -p[0])
-    return [p[1] for p in result]
+            (horiz if a <= _MAX_ANGLE else vert).append((length, (x1, y1, x2, y2)))
+        horiz.sort(key=lambda p: -p[0])
+        return [p[1] for p in horiz], [p[1] for p in vert]
+
+    h, w = edges.shape[:2]
+
+    # Pass 1
+    raw1 = cv2.HoughLinesP(edges, rho=1, theta=np.pi / 180,
+                            threshold=20, minLineLength=max(w // 5, 60), maxLineGap=30)
+    horiz, vert = _extract_horiz(raw1)
+
+    # Pass 2: if majority are vertical (neck lines drowned out) or too few horizontal
+    n_total = len(horiz) + len(vert)
+    if len(horiz) < 2 or (n_total > 0 and len(vert) > len(horiz)):
+        raw2 = cv2.HoughLinesP(edges, rho=1, theta=np.pi / 180,
+                                threshold=12, minLineLength=max(w // 8, 40), maxLineGap=50)
+        horiz2, _ = _extract_horiz(raw2)
+        if len(horiz2) > len(horiz):
+            horiz = horiz2
+            print(f"  [hough_fallback] pass2 rescued {len(horiz)} horizontal lines "
+                  f"(pass1: {len(horiz)} horiz / {len(vert)} vert)")
+
+    return horiz
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -850,6 +873,7 @@ def run_v14_pipeline(img_entry: dict,
             # No hand detected → try permissive global search for near-horizontal neck edges
             lines = _global_hough_fallback(img, edges)
             if lines:
+                out["lines"] = lines  # expose fallback lines to visualizer
                 out["debug_info"]["hough"] = {"fallback": "global_hough_no_hand", "n_lines": len(lines)}
                 print(f"  [no_hand_fallback] {len(lines)} near-horizontal line(s) via global Hough")
             else:
@@ -934,30 +958,50 @@ def run_v14_pipeline(img_entry: dict,
 
     # ROI minimum height: if fretboard strip is thinner than 15% of the image height,
     # expand corners symmetrically outward along the perp direction.
+    # Guard: when edge_info is None the fallback perp [0,1] is vertical — skip expansion
+    # if it would invert the trapezoid (make it taller than wide).
     try:
         roi_height = min(trap["w_start"], trap["w_end"])
         min_h_px = img.shape[0] * float(CFG.get("roi_min_height_frac", 0.15))
         if roi_height < min_h_px:
+            perp_is_fallback = edge_info is None
             perp = (np.array(edge_info["perp_dir"], dtype=np.float64)
                     if edge_info is not None else np.array([0.0, 1.0]))
             expand = (min_h_px - roi_height) / 2.0
             corners = trap["corners_px"].astype(np.float64)
             projs = [float(np.dot(corners[i], perp)) for i in range(4)]
-            left_idxs = sorted(range(4), key=lambda i: projs[i])[:2]
+            left_idxs  = sorted(range(4), key=lambda i: projs[i])[:2]
             right_idxs = sorted(range(4), key=lambda i: projs[i])[2:]
+            new_corners = corners.copy()
             for i in left_idxs:
-                corners[i] -= perp * expand
+                new_corners[i] -= perp * expand
             for i in right_idxs:
-                corners[i] += perp * expand
-            trap = dict(trap)
-            trap["corners_px"] = np.clip(corners, 0, None).astype(np.float32)
-            trap["w_start"] = float(np.linalg.norm(trap["corners_px"][1] - trap["corners_px"][0]))
-            trap["w_end"] = float(np.linalg.norm(trap["corners_px"][2] - trap["corners_px"][3]))
-            out["trap"] = trap
-            new_h = min(trap["w_start"], trap["w_end"])
-            out["debug_info"]["roi_min_height_expanded"] = {"from_px": roi_height, "to_px": new_h}
-            print(f"  [roi_min_height] {roi_height:.1f}→{new_h:.1f}px "
-                  f"(img_h={img.shape[0]}, thr={min_h_px:.0f}px)")
+                new_corners[i] += perp * expand
+            # Guard: vertical fallback perp must not produce a taller-than-wide ROI
+            _do_expand = True
+            if perp_is_fallback:
+                exp_w = float((np.linalg.norm(new_corners[1] - new_corners[0]) +
+                               np.linalg.norm(new_corners[2] - new_corners[3])) / 2.0)
+                exp_h = float((np.linalg.norm(new_corners[3] - new_corners[0]) +
+                               np.linalg.norm(new_corners[2] - new_corners[1])) / 2.0)
+                if exp_h > exp_w:
+                    _do_expand = False
+                    out["debug_info"]["roi_min_height"] = {
+                        "skipped": "vertical_fallback_would_invert",
+                        "exp_h": exp_h, "exp_w": exp_w,
+                    }
+                    print(f"  [roi_min_height] SKIP: vertical perp expansion would invert trapezoid "
+                          f"(h={exp_h:.0f}>w={exp_w:.0f})")
+            if _do_expand:
+                trap = dict(trap)
+                trap["corners_px"] = np.clip(new_corners, 0, None).astype(np.float32)
+                trap["w_start"] = float(np.linalg.norm(trap["corners_px"][1] - trap["corners_px"][0]))
+                trap["w_end"] = float(np.linalg.norm(trap["corners_px"][2] - trap["corners_px"][3]))
+                out["trap"] = trap
+                new_h = min(trap["w_start"], trap["w_end"])
+                out["debug_info"]["roi_min_height_expanded"] = {"from_px": roi_height, "to_px": new_h}
+                print(f"  [roi_min_height] {roi_height:.1f}→{new_h:.1f}px "
+                      f"(img_h={img.shape[0]}, thr={min_h_px:.0f}px)")
     except Exception as exc:
         out["debug_info"]["roi_min_height"] = _make_debug_info("roi_min_height", exc)
 
@@ -971,6 +1015,21 @@ def run_v14_pipeline(img_entry: dict,
     if not ok:
         out["debug_info"]["trap_sanity_warning"] = reasons
         print(f"  [trap_sanity] WARNING — continuing with sub-optimal trapezoid: {', '.join(reasons)}")
+
+    # Orientation guard: a trapezoid taller than wide means the warp would produce a
+    # 90°-rotated ROI instead of the expected wide fretboard strip — reject it early.
+    try:
+        _c = trap["corners_px"].astype(np.float64)
+        _trap_w = float((np.linalg.norm(_c[1] - _c[0]) + np.linalg.norm(_c[2] - _c[3])) / 2.0)
+        _trap_h = float((np.linalg.norm(_c[3] - _c[0]) + np.linalg.norm(_c[2] - _c[1])) / 2.0)
+        out["debug_info"]["trap_orientation"] = {"trap_w": _trap_w, "trap_h": _trap_h}
+        if _trap_h > _trap_w:
+            out["invalid_reason"] = f"trap_orientation: h({_trap_h:.0f})>w({_trap_w:.0f})"
+            out["debug_info"]["trap_orientation"]["reason"] = "vertical_trapezoid_rejected"
+            print(f"  [trap_orient] REJECT: vertical trapezoid h={_trap_h:.0f}>w={_trap_w:.0f}px")
+            return out
+    except Exception as exc:
+        out["debug_info"]["trap_orientation"] = _make_debug_info("trap_orientation", exc)
 
     try:
         H, H_inv, canon = step6_warp(img, trap["corners_px"])
