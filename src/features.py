@@ -108,21 +108,30 @@ def assemble_feature_vector(result: dict) -> np.ndarray:
     fingertips = result.get("fingertips", []) if ok else []
     fit = result.get("fit") or {}
     coverage = float(fit.get("coverage_ratio", 0.0))
+    is_flipped = bool(result.get("is_flipped", False))
 
     hand_detected = 1.0 if landmarks is not None else 0.0
     fretboard_detected = 1.0 if (ok and coverage >= COVERAGE_THRESHOLD) else 0.0
 
-    # Group B – mindig számol, ha van landmark
-    vec[_OFF_B:_OFF_D] = _group_b(landmarks)
+    # Group B – wrist-normalized landmarks; negate x when flipped so the
+    # classifier always sees a standard nut-left hand pose.
+    b = _group_b(landmarks)
+    if is_flipped:
+        b[0::2] = -b[0::2]   # x components are at even indices
+    vec[_OFF_B:_OFF_D] = b
 
     # Group D – flags
     vec[_OFF_D] = hand_detected
     vec[_OFF_D + 1] = fretboard_detected
 
-    # Group F – neck angle (csak ok=True esetén)
-    vec[_OFF_F:_OFF_G] = _group_f(neck)
+    # Group F – neck angle; horizontal flip negates the sin component (slope sign).
+    f = _group_f(neck)
+    if is_flipped:
+        f[1] = -f[1]
+    vec[_OFF_F:_OFF_G] = f
 
     # Group G + H – fret/string (csak ok=True AND jó coverage esetén)
+    # fret_est is orientation-agnostic (fret number), string_norm is y-based → no flip needed.
     if fretboard_detected > 0.5:
         g, h = _group_gh(fingertips, ok)
         vec[_OFF_G:_OFF_H] = g

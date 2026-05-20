@@ -100,6 +100,10 @@ def create_full_pipeline_audit(image, results, save_path=None):
     fingertips  = results.get("fingertips") or []
     ok          = bool(results.get("ok", False))
     cov         = float(fit.get("coverage_ratio", 0.0))
+    is_flipped  = bool(results.get("is_flipped", False))
+    nut_direction = results.get("nut_direction", "unknown")
+    dir_arrow   = "← Nut" if not is_flipped else "Nut →"
+    dir_color   = "#2ecc71" if not is_flipped else "#e67e22"
 
     # Prototype nut + inlays – csak vizualizációhoz
     _proto_nut = None
@@ -517,8 +521,13 @@ def create_full_pipeline_audit(image, results, save_path=None):
             ax.imshow(img_rgb)
         n_pred = len(pred_x)
         nut_side = results.get("nut_side_hint", "?")
+        # Direction arrow annotation at top of image
+        ax.annotate(dir_arrow, xy=(0.02 if not is_flipped else 0.98, 0.96),
+                    xycoords="axes fraction", fontsize=9, fontweight="bold",
+                    color=dir_color,
+                    ha="left" if not is_flipped else "right", va="top")
         ax.set_title(
-            f"Final Overlay  frets={n_pred}  side={nut_side}",
+            f"Final Overlay  frets={n_pred}  {nut_direction}",
             fontsize=9, color=ok_color,
         )
 
@@ -549,7 +558,11 @@ def create_full_pipeline_audit(image, results, save_path=None):
                 ax.scatter([cx], [h_src / 2], c="#3498db", s=20, zorder=5,
                            marker="o", alpha=0.85)
         n_fitted = len(pred_x)
-        ax.set_title(f"Canonical ROI + frets ({n_fitted} fitted)  inlays={len(proto_inlays)}",
+        ax.annotate(dir_arrow, xy=(0.02 if not is_flipped else 0.98, 0.96),
+                    xycoords="axes fraction", fontsize=8, fontweight="bold",
+                    color=dir_color,
+                    ha="left" if not is_flipped else "right", va="top")
+        ax.set_title(f"Canonical ROI + frets ({n_fitted} fitted)  inlays={len(proto_inlays)}  {dir_arrow}",
                      fontsize=9)
 
     _safe_draw(ax, _draw_canon_frets, fallback_msg="Canonical ROI unavailable")
@@ -590,6 +603,11 @@ def create_full_pipeline_audit(image, results, save_path=None):
             lines_txt.append(f"Hiba    : {results.get('invalid_reason', 'n/a')}")
         lines_txt.append(f"Osztály : {results.get('class', '?')}")
         lines_txt.append(f"Fájl    : {results.get('fname', results.get('path', '?'))}")
+        lines_txt.append(f"")
+        lines_txt.append(f"── Irány ────────────────────")
+        lines_txt.append(f"  {dir_arrow}  {'(tükrözött)' if is_flipped else '(standard)'}")
+        lines_txt.append(f"  fit_dir : {fit.get('fit_direction', 'n/a')}")
+        lines_txt.append(f"  is_flip : {is_flipped}")
         lines_txt.append(f"")
         lines_txt.append(f"── Bund detektálás ──────────")
         lines_txt.append(f"Raw detek  : {len(fret_xs_raw)}")
