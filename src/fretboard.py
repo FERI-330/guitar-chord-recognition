@@ -542,13 +542,17 @@ class IntensityFretDetector(FretDetectorInterface):
 
         debug_info = {}
         profile = None
+        raw_profile = None
         active_mode = self.mode
         auto_meta = None
         try:
             gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            raw_profile = self._linear_profile(gray)
             if self.mode == "auto":
                 active_mode, auto_meta = self._select_mode(shear)
             profile = self._dispatch_profile(gray, active_mode)
+            profile = np.nan_to_num(profile, nan=0.0, posinf=0.0, neginf=0.0)
+            raw_profile = np.nan_to_num(raw_profile, nan=0.0, posinf=0.0, neginf=0.0)
 
             # SNR-alapú fallback csak auto+sobel esetén: ha Sobel gyenge → Max-pooling
             if active_mode == "sobel" and self.mode == "auto":
@@ -625,6 +629,7 @@ class IntensityFretDetector(FretDetectorInterface):
                 fret_xs_filt = []
                 removed_pairs = []
                 profile = None
+                raw_profile = None
 
         nut_side = nut["side"] if nut else None
         refine_enabled = bool(CFG.get("fret_refine_enabled", True))
@@ -667,6 +672,7 @@ class IntensityFretDetector(FretDetectorInterface):
             "removed_pairs": removed_pairs,
             "method":        f"intensity_{active_mode}",
             "profile":       profile,
+            "profile_raw":   raw_profile,
             "profile_mode":  active_mode,
             "auto_strategy": auto_meta,
         }
