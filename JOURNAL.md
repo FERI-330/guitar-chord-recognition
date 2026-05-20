@@ -259,6 +259,26 @@
 
 ---
 
+## 🗓️ 2026-05-20 – Finger-to-fret mapping és notebook integráció
+
+### Elvégzett műveletek
+
+- Új `src/logic.py` modul létrehozva a `map_fingers_to_frets(mp_results, detection_results)` függvénnyel
+- MediaPipe ujjhegyek ROI-koordinátára transzformálása és bundköz szerinti hozzárendelés megvalósítva
+- A notebook dashboard frissítve: ROI-n megjelenő ujjhegy-körök és per-ujj mapping táblázat
+- A hiányzó `src.logic` import és a notebook elején keletkezett indentációs hiba javítva
+
+### Kiemelt döntések
+
+- A bundpozíciók kizárólag a `detection_results` által szolgáltatott fret-koordinátákból kerülnek kiolvasásra
+- Ha az ujj a nut előtt vagy a fogólapon kívül van, az eredmény `OUT`
+- A notebook vizualizáció külön jeleníti meg a master dashboardot és a finger-mapping panelt, hogy az első eredmény azonnal olvasható legyen
+
+### Státusz
+✅ Finger-to-fret mapping elérhető, a notebook importálható, a GUI a bundközöket és az ujjpozíciókat együtt mutatja
+
+---
+
 ## 🗓️ 2026-05-12 – Környezeti konfiguráció és hibajavítás (1. körös)
 
 ### Probléma: CUDA nem volt elérhető – vegyes conda/pip konfliktus
