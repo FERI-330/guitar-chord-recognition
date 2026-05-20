@@ -63,6 +63,33 @@ def _config_patch(**overrides):
         CFG.update(cfg_backup)
 
 
+def _make_debug_info(stage: str, exc: Exception | str, **extra) -> dict:
+    """Compact diagnostic payload for partial pipeline failures."""
+    info = {"stage": stage, "error": str(exc)}
+    for key, value in extra.items():
+        if value is not None:
+            info[key] = value
+    return info
+
+
+def _make_safety_nut(canon_bgr: np.ndarray,
+                     side_hint: Optional[str] = None,
+                     margin_px: int = 4) -> dict:
+    """Fallback nut anchor near the ROI edge so fret fitting can still run."""
+    width = int(canon_bgr.shape[1]) if canon_bgr is not None else int(CFG["canonical_w"])
+    side = side_hint if side_hint in ("left", "right") else "left"
+    nut_x = margin_px if side == "left" else max(0, width - 1 - margin_px)
+    return {
+        "side": side,
+        "nut_x": float(nut_x),
+        "peak": 0.0,
+        "ratio": 0.0,
+        "width_px": 0.0,
+        "col_response": None,
+        "safety": True,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Trapézoid validálás
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +114,14 @@ def validate_trapezoid(corners: np.ndarray,
     h, w = img_shape[:2]
     img_area = float(h * w)
     reasons = []
+
+    min_aspect = float(CFG.get("sanity_min_aspect", min_aspect))
+    area_limits = CFG.get("sanity_area_limits", {}) or {}
+    area_frac_range = (
+        float(area_limits.get("min_frac", area_frac_range[0])),
+        float(area_limits.get("max_frac", area_frac_range[1])),
+    )
+    max_edge_angle_diff_deg = float(CFG.get("sanity_max_edge_angle_diff_deg", max_edge_angle_diff_deg))
 
     corners = np.asarray(corners, dtype=np.float64).reshape(4, 2)
     tl, tr, br, bl = corners
@@ -326,21 +361,23 @@ class GeometricFretDetector(FretDetectorInterface):
     def detect(self, canon_bgr: np.ndarray,
                nut: Optional[dict] = None,
                shear: Optional[dict] = None) -> dict:
-        fret_xs_raw = step7_fret_lines_canonical(canon_bgr)
-        fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
-
-        nut_side = nut["side"] if nut else None
-        refine_enabled = bool(CFG.get("fret_refine_enabled", True))
-        refine_tol = float(CFG.get("fret_refine_tol_px", 12.0))
-
         try:
+            fret_xs_raw = step7_fret_lines_canonical(canon_bgr)
+            fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
+
+            nut_side = nut["side"] if nut else None
+            refine_enabled = bool(CFG.get("fret_refine_enabled", True))
+            refine_tol = float(CFG.get("fret_refine_tol_px", 12.0))
+
             fit_pass1 = step8_fit_fret_rule(
                 fret_xs_filt,
                 nut_anchored=(nut_side is not None),
                 nut_side=nut_side,
             )
-            if refine_enabled:
-                fret_xs_filt = refine_frets_by_fit(fret_xs_filt, fit_pass1, refine_tol)
+            if refine_enabled and len(fret_xs_filt) >= 3:
+                refined_frets = refine_frets_by_fit(fret_xs_filt, fit_pass1, refine_tol)
+                if refined_frets:
+                    fret_xs_filt = refined_frets
                 fit = step8_fit_fret_rule(
                     fret_xs_filt,
                     nut_anchored=(nut_side is not None),
@@ -349,17 +386,28 @@ class GeometricFretDetector(FretDetectorInterface):
             else:
                 fit = fit_pass1
         except Exception as exc:
-            print(f"  [GeometricFretDetector] step8 hiba: {exc}")
-            fit = _make_empty_fit()
+            print(f"  [GeometricFretDetector] hiba: {exc}")
+            debug_info = _make_debug_info("geometric_detect", exc)
+            return {
+                "fit": _make_empty_fit(),
+                "fret_xs_raw": [],
+                "fret_xs_filt": [],
+                "removed_pairs": [],
+                "method": "geometric",
+                "debug_info": debug_info,
+            }
 
         fit["method"] = "geometric"
-        return {
+        result = {
             "fit":           fit,
             "fret_xs_raw":   fret_xs_raw,
             "fret_xs_filt":  fret_xs_filt,
             "removed_pairs": removed_pairs,
             "method":        "geometric",
         }
+        if fit_pass1.get("score", 0.0) <= 0.0 and not fret_xs_filt:
+            result["debug_info"] = _make_debug_info("geometric_detect", "no_frets_found")
+        return result
 
 
 class IntensityFretDetector(FretDetectorInterface):
@@ -492,61 +540,91 @@ class IntensityFretDetector(FretDetectorInterface):
                shear: Optional[dict] = None) -> dict:
         from scipy.signal import find_peaks
 
-        gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        auto_meta = None
+        debug_info = {}
+        profile = None
         active_mode = self.mode
-        if self.mode == "auto":
-            active_mode, auto_meta = self._select_mode(shear)
-        profile = self._dispatch_profile(gray, active_mode)
+        auto_meta = None
+        try:
+            gray = cv2.cvtColor(canon_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            if self.mode == "auto":
+                active_mode, auto_meta = self._select_mode(shear)
+            profile = self._dispatch_profile(gray, active_mode)
 
-        # SNR-alapú fallback csak auto+sobel esetén: ha Sobel gyenge → Max-pooling
-        if active_mode == "sobel" and self.mode == "auto":
-            snr_val = self._snr(profile)
-            if snr_val < self._SNR_FALLBACK_THR:
-                profile = self._max_profile(gray)
-                active_mode = "max"
-                if auto_meta is not None:
-                    auto_meta = {
-                        **auto_meta,
-                        "strategy": "max",
-                        "reason": "sobel_low_snr_fallback",
-                        "sobel_snr": snr_val,
-                    }
-                print(f"  [IntensityFretDetector] Sobel SNR={snr_val:.2f} → Max-pooling fallback")
+            # SNR-alapú fallback csak auto+sobel esetén: ha Sobel gyenge → Max-pooling
+            if active_mode == "sobel" and self.mode == "auto":
+                snr_val = self._snr(profile)
+                if snr_val < self._SNR_FALLBACK_THR:
+                    profile = self._max_profile(gray)
+                    active_mode = "max"
+                    if auto_meta is not None:
+                        auto_meta = {
+                            **auto_meta,
+                            "strategy": "max",
+                            "reason": "sobel_low_snr_fallback",
+                            "sobel_snr": snr_val,
+                        }
+                    print(f"  [IntensityFretDetector] Sobel SNR={snr_val:.2f} → Max-pooling fallback")
 
-        residual = None if shear is None else float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0)))
-        confidence = None if shear is None else float(shear.get("hough_confidence", 0.0))
-        _shear_info = "n/a" if shear is None else f"res={residual:.2f}° conf={confidence:.2f}"
-        print(f"  [IntensityFretDetector] mode={active_mode} | shear={_shear_info}")
+            residual = None if shear is None else float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0)))
+            confidence = None if shear is None else float(shear.get("hough_confidence", 0.0))
+            _shear_info = "n/a" if shear is None else f"res={residual:.2f}° conf={confidence:.2f}"
+            print(f"  [IntensityFretDetector] mode={active_mode} | shear={_shear_info}")
 
-        residual = abs(float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0)))) if shear else 0.0
-        conf = float(shear.get("hough_confidence", 0.0)) if shear else 0.0
-        dyn_prom = float(np.clip(
-            self.peak_prominence * (1.0 + residual / 0.6) * (1.0 + max(0.0, 0.7 - conf) * 0.5),
-            0.02,
-            0.35,
-        ))
-        min_width = 1.0 if active_mode == "sobel" else 2.0
-        max_width = float(np.clip(
-            self.peak_max_width + (3.0 if active_mode == "max" else 0.0) + min(residual * 4.0, 4.0),
-            min_width + 0.5,
-            24.0,
-        ))
+            residual = abs(float(shear.get("residual_shear_deg", shear.get("shear_angle_deg", 0.0)))) if shear else 0.0
+            conf = float(shear.get("hough_confidence", 0.0)) if shear else 0.0
+            dyn_prom = float(np.clip(
+                self.peak_prominence * (1.0 + residual / 0.6) * (1.0 + max(0.0, 0.7 - conf) * 0.5),
+                0.02,
+                0.35,
+            ))
+            min_width = 1.0 if active_mode == "sobel" else 2.0
+            max_width = float(np.clip(
+                self.peak_max_width + (3.0 if active_mode == "max" else 0.0) + min(residual * 4.0, 4.0),
+                min_width + 0.5,
+                28.0,
+            ))
 
-        peak_idxs, _ = find_peaks(
-            profile,
-            height=self.peak_height,
-            distance=self.peak_distance,
-            prominence=dyn_prom,
-            width=(min_width, max_width),
-        )
+            peak_idxs, _ = find_peaks(
+                profile,
+                height=self.peak_height,
+                distance=self.peak_distance,
+                prominence=dyn_prom,
+                width=(min_width, max_width),
+            )
 
-        fret_xs_raw = [float(i) for i in peak_idxs]
+            if len(peak_idxs) < 2:
+                relaxed_idxs, _ = find_peaks(
+                    profile,
+                    height=max(0.02, self.peak_height * 0.75),
+                    distance=max(3, self.peak_distance // 2),
+                    prominence=max(0.02, dyn_prom * 0.5),
+                    width=(1.0, None),
+                )
+                if len(relaxed_idxs) > len(peak_idxs):
+                    debug_info["peak_fallback"] = "relaxed_find_peaks"
+                    peak_idxs = relaxed_idxs
 
-        if self.suppress_pairs:
-            fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
-        else:
-            fret_xs_filt, removed_pairs = fret_xs_raw, []
+            fret_xs_raw = [float(i) for i in peak_idxs]
+            if len(fret_xs_raw) < 2:
+                raise RuntimeError("too_few_peak_candidates")
+
+            if self.suppress_pairs:
+                fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw)
+            else:
+                fret_xs_filt, removed_pairs = fret_xs_raw, []
+
+        except Exception as exc:
+            debug_info.update(_make_debug_info("peak_detection", exc, mode=active_mode))
+            try:
+                fret_xs_raw = step7_fret_lines_canonical(canon_bgr)
+                fret_xs_filt, removed_pairs = suppress_finger_pairs(fret_xs_raw) if self.suppress_pairs else (list(fret_xs_raw), [])
+                debug_info["fallback"] = "geometric_step7"
+            except Exception as fallback_exc:
+                debug_info["fallback_error"] = str(fallback_exc)
+                fret_xs_raw = []
+                fret_xs_filt = []
+                removed_pairs = []
+                profile = None
 
         nut_side = nut["side"] if nut else None
         refine_enabled = bool(CFG.get("fret_refine_enabled", True))
@@ -558,17 +636,18 @@ class IntensityFretDetector(FretDetectorInterface):
                 nut_anchored=(nut_side is not None),
                 nut_side=nut_side,
             )
-            if refine_enabled:
-                fret_xs_filt = refine_frets_by_fit(fret_xs_filt, fit_pass1, refine_tol)
-                fit = step8_fit_fret_rule(
-                    fret_xs_filt,
-                    nut_anchored=(nut_side is not None),
-                    nut_side=nut_side,
-                )
-            else:
-                fit = fit_pass1
+            fit = fit_pass1
+            if refine_enabled and len(fret_xs_filt) >= 3:
+                refined_frets = refine_frets_by_fit(fret_xs_filt, fit_pass1, refine_tol)
+                if refined_frets:
+                    fret_xs_filt = refined_frets
+                    fit = step8_fit_fret_rule(
+                        fret_xs_filt,
+                        nut_anchored=(nut_side is not None),
+                        nut_side=nut_side,
+                    )
         except Exception as exc:
-            print(f"  [IntensityFretDetector] step8 hiba: {exc}")
+            debug_info.update(_make_debug_info("step8_fit", exc, mode=active_mode))
             fit = _make_empty_fit()
 
         fit["method"] = f"intensity_{active_mode}"
@@ -576,11 +655,12 @@ class IntensityFretDetector(FretDetectorInterface):
             auto_meta = {
                 **auto_meta,
                 "active_mode": active_mode,
-                "peak_prominence": dyn_prom,
-                "peak_width_min": min_width,
-                "peak_width_max": max_width,
+                "peak_prominence": locals().get("dyn_prom"),
+                "peak_width_min": locals().get("min_width"),
+                "peak_width_max": locals().get("max_width"),
             }
-        return {
+
+        result = {
             "fit":           fit,
             "fret_xs_raw":   fret_xs_raw,
             "fret_xs_filt":  fret_xs_filt,
@@ -590,6 +670,9 @@ class IntensityFretDetector(FretDetectorInterface):
             "profile_mode":  active_mode,
             "auto_strategy": auto_meta,
         }
+        if debug_info:
+            result["debug_info"] = debug_info
+        return result
 
 
 _FRET_DETECTOR_FACTORIES = {
@@ -637,211 +720,286 @@ def run_v14_pipeline(img_entry: dict,
         "fret_detector_method": "none",
         "intensity_profile_mode": None,
         "intensity_auto_strategy": None,
+        "debug_info": {},
     }
 
-    # ── Kép betöltés ────────────────────────────────────────────────────────
     try:
         img = load_image_bgr(img_entry["path"])
-    except FileNotFoundError as e:
+    except FileNotFoundError as exc:
         out["invalid_reason"] = "load_failed"
+        out["debug_info"] = _make_debug_info("load_image", exc)
         return out
     out["img"] = img
 
-    # ── 1. MediaPipe landmarks ───────────────────────────────────────────────
-    # (Landmarks detektálása az eredeti képen fut — CLAHE ronthatja a MediaPipe teljesítményét)
-    landmarks = step9_detect_landmarks(img_entry["path"], landmarker)
+    landmarks = None
+    try:
+        # Landmarks detektálása az eredeti képen fut — CLAHE ronthatja a MediaPipe teljesítményét.
+        landmarks = step9_detect_landmarks(img_entry["path"], landmarker)
+    except Exception as exc:
+        out["debug_info"]["landmarks"] = _make_debug_info("landmarks", exc)
     out["landmarks"] = landmarks
 
-    # ── 2. Anchor + ujjmaszk ────────────────────────────────────────────────
-    anchor = anchor_neck_angle(landmarks, img.shape)
+    try:
+        anchor = anchor_neck_angle(landmarks, img.shape)
+    except Exception as exc:
+        anchor = None
+        out["debug_info"]["anchor"] = _make_debug_info("anchor", exc)
     out["anchor"] = anchor
-    orientation = detect_guitar_orientation({"landmarks": landmarks, "img_shape": img.shape})
+
+    try:
+        orientation = detect_guitar_orientation({"landmarks": landmarks, "img_shape": img.shape})
+    except Exception as exc:
+        orientation = None
+        out["debug_info"]["orientation"] = _make_debug_info("orientation", exc)
     out["guitar_orientation"] = orientation
-    finger_mask = build_finger_mask(img.shape, landmarks)
+
+    try:
+        finger_mask = build_finger_mask(img.shape, landmarks)
+    except Exception as exc:
+        finger_mask = np.zeros(img.shape[:2], dtype=np.uint8)
+        out["debug_info"]["finger_mask"] = _make_debug_info("finger_mask", exc)
     out["finger_mask"] = finger_mask
 
-    # ── Pre-pipeline előfeldolgozás (opcionális) ─────────────────────────────
     if preprocessor is not None:
-        img = preprocessor.process(img)
-        out["img_preprocessed"] = img
+        try:
+            img = preprocessor.process(img)
+            out["img_preprocessed"] = img
+        except Exception as exc:
+            out["debug_info"]["preprocess"] = _make_debug_info("preprocess", exc)
 
-    # ── 3. Canny + maszkolás ────────────────────────────────────────────────
-    edges = step1_canny(img)
-    edges_masked = edges.copy()
-    if finger_mask.any():
-        edges_masked[finger_mask > 0] = 0
-    out["edges"] = edges
-    out["edges_masked"] = edges_masked
-
-    # ── 4. Hough ────────────────────────────────────────────────────────────
-    lines = step2_hough(img, edges_masked)
-    out["lines"] = lines
-    if not lines:
-        out["invalid_reason"] = "no_hough_lines"
+    try:
+        edges = step1_canny(img)
+        edges_masked = edges.copy()
+        if finger_mask.any():
+            edges_masked[finger_mask > 0] = 0
+        out["edges"] = edges
+        out["edges_masked"] = edges_masked
+    except Exception as exc:
+        out["invalid_reason"] = f"canny_failed: {exc}"
+        out["debug_info"] = {**out["debug_info"], "edges": _make_debug_info("edges", exc)}
         return out
 
-    # ── 5. Nyakirány: plain elsőként, anchor csak ha szükséges ─────────────
-    neck_plain = step3_neck_angle(lines)
-    split_plain = step4_split_lines(lines, neck_plain["angle_deg"])
-    if len(split_plain["long_lines"]) >= 3 or anchor is None:
-        neck, split = neck_plain, split_plain
-        neck["anchor_used"] = False
-    else:
-        neck_anc = step3_neck_angle_anchored(lines, anchor=anchor)
-        split_anc = step4_split_lines(lines, neck_anc["angle_deg"])
-        if len(split_anc["long_lines"]) > len(split_plain["long_lines"]):
-            neck, split = neck_anc, split_anc
-            neck["anchor_used"] = True
-        else:
+    try:
+        lines = step2_hough(img, edges_masked)
+        out["lines"] = lines
+    except Exception as exc:
+        out["invalid_reason"] = f"hough_failed: {exc}"
+        out["debug_info"] = {**out["debug_info"], "hough": _make_debug_info("hough", exc)}
+        return out
+    if not lines:
+        out["invalid_reason"] = "no_hough_lines"
+        out["debug_info"]["hough"] = _make_debug_info("hough", "no_hough_lines")
+        return out
+
+    try:
+        neck_plain = step3_neck_angle(lines)
+        split_plain = step4_split_lines(lines, neck_plain["angle_deg"])
+        if len(split_plain["long_lines"]) >= 3 or anchor is None:
             neck, split = neck_plain, split_plain
             neck["anchor_used"] = False
+        else:
+            neck_anc = step3_neck_angle_anchored(lines, anchor=anchor)
+            split_anc = step4_split_lines(lines, neck_anc["angle_deg"])
+            if len(split_anc["long_lines"]) > len(split_plain["long_lines"]):
+                neck, split = neck_anc, split_anc
+                neck["anchor_used"] = True
+            else:
+                neck, split = neck_plain, split_plain
+                neck["anchor_used"] = False
 
-    # Nyakirány finomítás bund-vonalakból (step3b).
-    # Megjegyzés: az alapértelmezett hough_min_len_frac=0.15 általában szűri a rövid
-    # fret-vonalakat, így ez a blokk csak kisebb frac érték esetén aktív.
-    if len(split["fret_lines"]) >= 3:
-        refined_angle = step3b_refine_neck_angle(neck["angle_deg"], split["fret_lines"])
-        if abs(refined_angle - neck["angle_deg"]) > 0.1:
-            split = step4_split_lines(lines, refined_angle)
-            neck = dict(neck)
-            neck["angle_deg"] = refined_angle
-            neck["angle_refined"] = True
+        if len(split["fret_lines"]) >= 3:
+            refined_angle = step3b_refine_neck_angle(neck["angle_deg"], split["fret_lines"])
+            if abs(refined_angle - neck["angle_deg"]) > 0.1:
+                split = step4_split_lines(lines, refined_angle)
+                neck = dict(neck)
+                neck["angle_deg"] = refined_angle
+                neck["angle_refined"] = True
 
-    out["neck"] = neck
-    out["split"] = split
+        out["neck"] = neck
+        out["split"] = split
+    except Exception as exc:
+        out["invalid_reason"] = f"neck_split_failed: {exc}"
+        out["debug_info"]["neck"] = _make_debug_info("neck_split", exc)
+        return out
 
     if not split["long_lines"]:
         out["invalid_reason"] = "no_long_lines"
+        out["debug_info"]["neck"] = _make_debug_info("neck_split", "no_long_lines")
         return out
 
-    # ── 6. Outer edges ──────────────────────────────────────────────────────
-    edge_info = step5_outer_edges(split["long_lines"], neck["angle_deg"])
-    out["edge_info"] = edge_info
+    try:
+        edge_info = step5_outer_edges(split["long_lines"], neck["angle_deg"])
+        out["edge_info"] = edge_info
+    except Exception as exc:
+        out["invalid_reason"] = f"outer_edges_failed: {exc}"
+        out["debug_info"]["outer_edges"] = _make_debug_info("outer_edges", exc)
+        return out
     if edge_info is None:
         out["invalid_reason"] = "no_outer_edges"
+        out["debug_info"]["outer_edges"] = _make_debug_info("outer_edges", "no_outer_edges")
         return out
 
-    # ── 6b. Trapézoid along-extent clamp a csuklóhoz ────────────────────────
-    edge_info = step6_clamp_trapezoid_extent(edge_info, anchor)
+    try:
+        edge_info = step6_clamp_trapezoid_extent(edge_info, anchor)
+    except Exception as exc:
+        out["debug_info"]["clamp_extent"] = _make_debug_info("clamp_extent", exc)
 
-    # ── 7. Trapézoid (Nut-First: orientation-adapted kiterjesztés) ───────────
     trap_overrides = {}
     if orientation is not None:
         trap_overrides["nut_extend_amin_margin_px"] = int(orientation.get(
             "extend_margin_px", CFG.get("nut_extend_amin_margin_px", 120)
         ))
-    with _config_patch(**trap_overrides):
-        trap = step6_trapezoid(img, edge_info, landmarks=landmarks)
+    try:
+        with _config_patch(**trap_overrides):
+            trap = step6_trapezoid(img, edge_info, landmarks=landmarks)
+    except Exception as exc:
+        trap = None
+        out["invalid_reason"] = f"trapezoid_failed: {exc}"
+        out["debug_info"]["trapezoid"] = _make_debug_info("trapezoid", exc)
     out["trap"] = trap
     if trap is None:
-        out["invalid_reason"] = "no_trapezoid"
+        if out["invalid_reason"] is None:
+            out["invalid_reason"] = "no_trapezoid"
         return out
 
-    # ── 8. Trapézoid szanitás ───────────────────────────────────────────────
-    ok, reasons = validate_trapezoid(trap["corners_px"], img.shape, landmarks)
+    try:
+        ok, reasons = validate_trapezoid(trap["corners_px"], img.shape, landmarks)
+    except Exception as exc:
+        ok, reasons = False, [f"validate_failed: {exc}"]
+        out["debug_info"]["trap_sanity"] = _make_debug_info("trap_sanity", exc)
     out["trap_ok"] = ok
     out["trap_reasons"] = reasons
     if not ok:
         out["invalid_reason"] = "trapezoid_sanity: " + ", ".join(reasons)
         return out
 
-    # ── 9. Warp ─────────────────────────────────────────────────────────────
-    H, H_inv, canon = step6_warp(img, trap["corners_px"])
+    try:
+        H, H_inv, canon = step6_warp(img, trap["corners_px"])
+    except Exception as exc:
+        out["invalid_reason"] = f"warp_failed: {exc}"
+        out["debug_info"]["warp"] = _make_debug_info("warp", exc)
+        return out
     out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
 
-    # ── 10. Nut detektálás (side_hint + hand_boundary alapú keresés) ─────────
-    side_hint = orientation["side_hint"] if orientation and orientation.get("side_hint") else _choose_nut_side(anchor, H, img.shape, landmarks=landmarks)
+    side_hint = None
+    try:
+        side_hint = orientation["side_hint"] if orientation and orientation.get("side_hint") else _choose_nut_side(anchor, H, img.shape, landmarks=landmarks)
+    except Exception as exc:
+        out["debug_info"]["nut_side_hint"] = _make_debug_info("nut_side_hint", exc)
     out["nut_side_hint"] = side_hint
 
-    # Kézél vetítése a kanonikus térbe → Nut-keresési sáv korlátozása
     hand_bnd_x: Optional[float] = None
-    near_edge = get_fretboard_near_edge(landmarks, img.shape)
-    if near_edge is not None:
-        hand_bnd_x = _project_landmark_to_canon(near_edge, H)
+    try:
+        near_edge = get_fretboard_near_edge(landmarks, img.shape)
+        if near_edge is not None:
+            hand_bnd_x = _project_landmark_to_canon(near_edge, H)
+    except Exception as exc:
+        out["debug_info"]["hand_boundary"] = _make_debug_info("hand_boundary", exc)
     out["hand_boundary_canon_x"] = hand_bnd_x
 
-    nut = step6b_find_nut(canon, side_hint=side_hint,
-                          hand_boundary_canon_x=hand_bnd_x)
+    try:
+        nut = step6b_find_nut(canon, side_hint=side_hint, hand_boundary_canon_x=hand_bnd_x)
+    except Exception as exc:
+        nut = None
+        out["debug_info"]["nut"] = _make_debug_info("nut", exc)
     out["nut"] = nut
 
-    # ── 10b. Nut fallback: ha nem detektálható, ROI bővítés és újra-keresés ─
-    if nut is None and side_hint is not None:
-        extend_px = int(orientation.get("fallback_extend_px", CFG.get("nut_fallback_extend_px", 80))) if orientation else int(CFG.get("nut_fallback_extend_px", 80))
-        corners_ext = step6_extend_for_nut(trap["corners_px"], H_inv, side_hint, extend_px)
-        if corners_ext is not None:
-            H_ext, H_ext_inv, canon_ext = step6_warp(img, corners_ext)
-            nut_ext = step6b_find_nut(canon_ext, side_hint=side_hint,
-                                      hand_boundary_canon_x=hand_bnd_x)
-            if nut_ext is not None:
-                H, H_inv, canon = H_ext, H_ext_inv, canon_ext
-                out["H"], out["H_inv"], out["canon"] = H, H_inv, canon
-                out["nut"] = nut_ext
-                nut = nut_ext
-                print(f"  [nut_fallback] nut találat kiterjesztett ROI-ban @ x={nut['nut_x']}px")
+    if nut is None:
+        nut = _make_safety_nut(canon, side_hint=side_hint)
+        nut["reason"] = "fallback_safety_nut"
+        out["nut"] = nut
+        out["nut_is_safety"] = True
+        out["debug_info"]["nut_fallback"] = _make_debug_info("nut_fallback", "safety_nut")
+    else:
+        out["nut_is_safety"] = bool(nut.get("safety", False))
 
-    # ── 11. Nut-trim + re-warp ──────────────────────────────────────────────
-    if nut is not None:
-        corners_trim = step6c_trim_to_nut(trap["corners_px"], H_inv, nut)
-        H2, H2_inv, canon2 = step6_warp(img, corners_trim)
-        out["corners_trim"] = corners_trim
-        out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
+    if out.get("trap") is not None and H_inv is not None:
+        try:
+            corners_trim = step6c_trim_to_nut(trap["corners_px"], H_inv, nut)
+            H2, H2_inv, canon2 = step6_warp(img, corners_trim)
+            out["corners_trim"] = corners_trim
+            out["H"], out["H_inv"], out["canon"] = H2, H2_inv, canon2
+        except Exception as exc:
+            out["debug_info"]["trim_to_nut"] = _make_debug_info("trim_to_nut", exc)
 
-    # ── 11b. Post-warp shear korrekció (step6d) ────────────────────────────
-    out["canon_pre_shear"] = out["canon"]   # fallback-összehasonlításhoz
-    shear = step6d_shear_correction(out["canon"])
+    out["canon_pre_shear"] = out.get("canon")
+    try:
+        shear = step6d_shear_correction(out["canon"])
+    except Exception as exc:
+        shear = {
+            "corrected": False,
+            "shear_angle_deg": 0.0,
+            "residual_shear_deg": 0.0,
+            "n_lines": 0,
+            "hough_confidence": 0.0,
+            "canon_corrected": out["canon"],
+            "S": np.eye(3, dtype=np.float32),
+            "S_inv": np.eye(3, dtype=np.float32),
+        }
+        out["debug_info"]["shear"] = _make_debug_info("shear", exc)
     out["shear"] = shear
-    if shear["corrected"]:
+    if shear.get("corrected"):
         out["H"]     = shear["S"] @ out["H"]
         out["H_inv"] = out["H_inv"] @ shear["S_inv"]
         out["canon"] = shear["canon_corrected"]
-        # Nut újra-detektálása a shear-korrigált kanonikus képen.
-        # A shear-korrekció a nut x-pozícióját eltolhatja (x_dst = -s·y),
-        # ezért a pre-shear nut_x nem használható a step8 anchor-ként.
-        nut_post = step6b_find_nut(
-            out["canon"],
-            side_hint=out.get("nut_side_hint"),
-            hand_boundary_canon_x=out.get("hand_boundary_canon_x"),
-        )
-        if nut_post is not None:
-            out["nut"] = nut_post
-            nut = nut_post
+        try:
+            nut_post = step6b_find_nut(
+                out["canon"],
+                side_hint=out.get("nut_side_hint"),
+                hand_boundary_canon_x=out.get("hand_boundary_canon_x"),
+            )
+            if nut_post is not None:
+                out["nut"] = nut_post
+                out["nut_is_safety"] = bool(nut_post.get("safety", False))
+        except Exception as exc:
+            out["debug_info"]["nut_post_shear"] = _make_debug_info("nut_post_shear", exc)
 
-    # ── 12–14. Bunddetektálás (cserélhető detektor) ─────────────────────────
     _detector = fret_detector if fret_detector is not None else _make_default_fret_detector()
     try:
-        det_result = _detector.detect(
-            out["canon"], nut=out.get("nut"), shear=out.get("shear")
-        )
-        out["fret_xs_raw"]          = det_result["fret_xs_raw"]
-        out["fret_xs_filt"]         = det_result["fret_xs_filt"]
-        out["removed_pairs"]        = det_result["removed_pairs"]
-        out["fit"]                  = det_result["fit"]
-        method_label = str(det_result.get("method", "unknown"))
-        if method_label.startswith("intensity"):
-            out["fret_detector_method"] = "intensity"
-            out["fret_detector_detail"] = method_label
-        elif method_label.startswith("geometric"):
-            out["fret_detector_method"] = "geometric"
-            out["fret_detector_detail"] = method_label
-        else:
-            out["fret_detector_method"] = method_label
-        # IntensityFretDetector esetén a gradiens-profil és aktív mód is elérhető
-        if "profile" in det_result:
-            out["intensity_profile"] = det_result["profile"]
-        if "profile_mode" in det_result:
-            out["intensity_profile_mode"] = det_result["profile_mode"]
-        if "auto_strategy" in det_result:
-            out["intensity_auto_strategy"] = det_result["auto_strategy"]
+        det_result = _detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"))
     except Exception as exc:
-        out["fit"] = None
-        out["invalid_reason"] = f"fret_detection_failed: {exc}"
-        return out
+        out["debug_info"]["fret_detector"] = _make_debug_info("fret_detector", exc, detector=type(_detector).__name__)
+        fallback_detector = GeometricFretDetector() if not isinstance(_detector, GeometricFretDetector) else IntensityFretDetector(mode="max")
+        try:
+            det_result = fallback_detector.detect(out["canon"], nut=out.get("nut"), shear=out.get("shear"))
+            out["debug_info"]["fret_detector_fallback"] = type(fallback_detector).__name__
+        except Exception as exc2:
+            out["fit"] = _make_empty_fit()
+            out["invalid_reason"] = f"fret_detection_failed: {exc2}"
+            out["debug_info"]["fret_detector_fallback_error"] = _make_debug_info("fret_detector_fallback", exc2)
+            return out
 
-    # ── 15. Ujjhegy vetítés (ha van landmark és H) ──────────────────────────
+    out["fret_xs_raw"]   = det_result.get("fret_xs_raw", [])
+    out["fret_xs_filt"]  = det_result.get("fret_xs_filt", [])
+    out["removed_pairs"] = det_result.get("removed_pairs", [])
+    out["fit"]           = det_result.get("fit", _make_empty_fit())
+    method_label = str(det_result.get("method", "unknown"))
+    if method_label.startswith("intensity"):
+        out["fret_detector_method"] = "intensity"
+        out["fret_detector_detail"] = method_label
+    elif method_label.startswith("geometric"):
+        out["fret_detector_method"] = "geometric"
+        out["fret_detector_detail"] = method_label
+    else:
+        out["fret_detector_method"] = method_label
+
+    if "profile" in det_result:
+        out["intensity_profile"] = det_result["profile"]
+    if "profile_mode" in det_result:
+        out["intensity_profile_mode"] = det_result["profile_mode"]
+    if "auto_strategy" in det_result:
+        out["intensity_auto_strategy"] = det_result["auto_strategy"]
+    if "debug_info" in det_result:
+        out["debug_info"]["fret_detector_detail"] = det_result["debug_info"]
+
     h_img, w_img = img.shape[:2]
-    out["fingertips"] = step9_project_fingertips(
-        landmarks, out["H"], w_img, h_img, fit=out.get("fit")
-    )
+    try:
+        out["fingertips"] = step9_project_fingertips(
+            landmarks, out["H"], w_img, h_img, fit=out.get("fit")
+        )
+    except Exception as exc:
+        out["fingertips"] = []
+        out["debug_info"]["fingertips"] = _make_debug_info("fingertips", exc)
 
     out["ok"] = True
     return out
