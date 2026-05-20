@@ -18,8 +18,10 @@ from scipy import signal
 
 try:
     from src.prototype_nut_detector import detect_nut_prototype as _detect_nut_proto
+    from src.prototype_nut_detector import detect_inlays_prototype as _detect_inlays_proto
 except Exception:
     _detect_nut_proto = None
+    _detect_inlays_proto = None
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _OUTPUT_DIR = _PROJECT_ROOT / "output"
@@ -99,7 +101,7 @@ def create_full_pipeline_audit(image, results, save_path=None):
     ok          = bool(results.get("ok", False))
     cov         = float(fit.get("coverage_ratio", 0.0))
 
-    # Prototype nut – csak vizualizációhoz
+    # Prototype nut + inlays – csak vizualizációhoz
     _proto_nut = None
     if _detect_nut_proto is not None:
         try:
@@ -107,6 +109,13 @@ def create_full_pipeline_audit(image, results, save_path=None):
         except Exception:
             pass
     nut = _proto_nut or {}
+
+    proto_inlays = []
+    if _detect_inlays_proto is not None:
+        try:
+            proto_inlays = _detect_inlays_proto(results) or []
+        except Exception:
+            pass
 
     # Intenzitás profil fallback
     if profile is None and canon is not None:
@@ -421,21 +430,32 @@ def create_full_pipeline_audit(image, results, save_path=None):
     ax = axs[10]
     def _draw_proto_nut():
         src = canon if canon is not None else img_bgr
+        h_src = src.shape[0]
         ax.imshow(cv2.cvtColor(src, cv2.COLOR_BGR2RGB), aspect="auto")
         nut_x = nut.get("nut_x") if nut else None
         nut_side = nut.get("side", "?") if nut else "?"
         if nut_x is not None:
-            ax.axvline(nut_x, color="yellow", lw=2.0, ls="--",
+            # Translucent yellow band ±4 px around nut position
+            ax.axvspan(nut_x - 4, nut_x + 4, color="yellow", alpha=0.35, zorder=2)
+            ax.axvline(nut_x, color="yellow", lw=1.5, ls="--", zorder=3,
                        label=f"nut @{int(nut_x)}px side={nut_side}")
+        # Inlay blue dots (prototype)
+        for inl in proto_inlays:
+            cx = inl.get("canon_x")
+            if cx is not None:
+                ax.scatter([cx], [h_src / 2], c="#3498db", s=28, zorder=5,
+                           marker="o", alpha=0.85)
+        if proto_inlays:
+            ax.scatter([], [], c="#3498db", s=28, marker="o",
+                       label=f"inlays ({len(proto_inlays)})")
+        if nut_x is not None or proto_inlays:
             ax.legend(fontsize=7, loc="upper right", framealpha=0.75)
-            ax.set_title(
-                f"Proto Nut (debug only)  x={int(nut_x)}px  "
-                f"side={nut_side}  "
-                f"{'⚠ safety' if nut.get('safety') else ''}",
-                fontsize=9,
-            )
-        else:
-            ax.set_title("Proto Nut  (nem detektált)", fontsize=9, color="#888888")
+        title_parts = [f"Proto Nut+Inlay (debug only)"]
+        if nut_x is not None:
+            title_parts.append(f"nut={int(nut_x)}px {nut_side}"
+                                f"{' ⚠' if nut.get('safety') else ''}")
+        title_parts.append(f"inlays={len(proto_inlays)}")
+        ax.set_title("  ".join(title_parts), fontsize=8)
 
     _safe_draw(ax, _draw_proto_nut, fallback_msg="Proto nut unavailable")
 
@@ -508,6 +528,7 @@ def create_full_pipeline_audit(image, results, save_path=None):
     ax = axs[13]
     def _draw_canon_frets():
         src = canon if canon is not None else img_bgr
+        h_src = src.shape[0]
         ax.imshow(cv2.cvtColor(src, cv2.COLOR_BGR2RGB), aspect="auto")
         # Raw filtered – dim gray
         for fx in fret_xs_filt:
@@ -515,13 +536,21 @@ def create_full_pipeline_audit(image, results, save_path=None):
         # Fitted – green
         for _, pfx in pred_x.items():
             ax.axvline(pfx, color="#2ecc71", lw=1.0)
-        # Proto nut – dashed yellow
+        # Proto nut – yellow band
         nut_x = nut.get("nut_x") if nut else None
         if nut_x is not None:
-            ax.axvline(nut_x, color="yellow", lw=1.5, ls="--",
+            ax.axvspan(nut_x - 4, nut_x + 4, color="yellow", alpha=0.30, zorder=2)
+            ax.axvline(nut_x, color="yellow", lw=1.2, ls="--", zorder=3,
                        label="nut (proto)")
+        # Inlay blue dots
+        for inl in proto_inlays:
+            cx = inl.get("canon_x")
+            if cx is not None:
+                ax.scatter([cx], [h_src / 2], c="#3498db", s=20, zorder=5,
+                           marker="o", alpha=0.85)
         n_fitted = len(pred_x)
-        ax.set_title(f"Canonical ROI + frets ({n_fitted} fitted)", fontsize=9)
+        ax.set_title(f"Canonical ROI + frets ({n_fitted} fitted)  inlays={len(proto_inlays)}",
+                     fontsize=9)
 
     _safe_draw(ax, _draw_canon_frets, fallback_msg="Canonical ROI unavailable")
 
@@ -576,6 +605,16 @@ def create_full_pipeline_audit(image, results, save_path=None):
         if nut:
             lines_txt.append(f"  x={nut.get('nut_x', 'n/a')}  side={nut.get('side', '?')}")
             lines_txt.append(f"  safety={nut.get('safety', False)}")
+        else:
+            lines_txt.append("  n/a")
+        lines_txt.append(f"── Prototype Inlays ─────────")
+        if proto_inlays:
+            for inl in proto_inlays[:6]:
+                cx = inl.get("canon_x")
+                cf = inl.get("confidence", 0.0)
+                lines_txt.append(f"  x={cx:.1f}  conf={cf:.2f}")
+            if len(proto_inlays) > 6:
+                lines_txt.append(f"  … +{len(proto_inlays)-6} more")
         else:
             lines_txt.append("  n/a")
         ax.text(0.02, 0.98, "\n".join(lines_txt), va="top", ha="left",

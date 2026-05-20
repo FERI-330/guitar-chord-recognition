@@ -72,6 +72,33 @@ def _make_debug_info(stage: str, exc: Exception | str, **extra) -> dict:
     return info
 
 
+def _global_hough_fallback(img: np.ndarray, edges: np.ndarray) -> list:
+    """Permissive HoughLinesP when standard step2_hough finds nothing (no hand).
+
+    Finds near-horizontal lines (|angle| ≤ 15°) sorted by length descending.
+    Returns same format as step2_hough: list of (x1, y1, x2, y2) tuples.
+    """
+    h, w = edges.shape[:2]
+    min_len = max(w // 5, 60)
+    raw = cv2.HoughLinesP(
+        edges, rho=1, theta=np.pi / 180,
+        threshold=20, minLineLength=min_len, maxLineGap=30,
+    )
+    if raw is None:
+        return []
+    result = []
+    for ln in raw:
+        x1, y1, x2, y2 = int(ln[0][0]), int(ln[0][1]), int(ln[0][2]), int(ln[0][3])
+        angle = abs(float(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
+        if angle > 90.0:
+            angle = 180.0 - angle
+        if angle <= 15.0:
+            length = float(np.hypot(x2 - x1, y2 - y1))
+            result.append((length, (x1, y1, x2, y2)))
+    result.sort(key=lambda p: -p[0])
+    return [p[1] for p in result]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Trapézoid validálás
 # ─────────────────────────────────────────────────────────────────────────────
@@ -786,9 +813,20 @@ def run_v14_pipeline(img_entry: dict,
         out["debug_info"] = {**out["debug_info"], "hough": _make_debug_info("hough", exc)}
         return out
     if not lines:
-        out["invalid_reason"] = "no_hough_lines"
-        out["debug_info"]["hough"] = _make_debug_info("hough", "no_hough_lines")
-        return out
+        if landmarks is None:
+            # No hand detected → try permissive global search for near-horizontal neck edges
+            lines = _global_hough_fallback(img, edges)
+            if lines:
+                out["debug_info"]["hough"] = {"fallback": "global_hough_no_hand", "n_lines": len(lines)}
+                print(f"  [no_hand_fallback] {len(lines)} near-horizontal line(s) via global Hough")
+            else:
+                out["invalid_reason"] = "no_hough_lines_no_hand"
+                out["debug_info"]["hough"] = _make_debug_info("hough", "no_hough_lines_no_hand")
+                return out
+        else:
+            out["invalid_reason"] = "no_hough_lines"
+            out["debug_info"]["hough"] = _make_debug_info("hough", "no_hough_lines")
+            return out
 
     try:
         neck_plain = step3_neck_angle(lines)
@@ -860,6 +898,34 @@ def run_v14_pipeline(img_entry: dict,
         if out["invalid_reason"] is None:
             out["invalid_reason"] = "no_trapezoid"
         return out
+
+    # ROI minimum height: if fretboard strip is thinner than 15% of the image height,
+    # expand corners symmetrically outward along the perp direction.
+    try:
+        roi_height = min(trap["w_start"], trap["w_end"])
+        min_h_px = img.shape[0] * float(CFG.get("roi_min_height_frac", 0.15))
+        if roi_height < min_h_px and edge_info is not None:
+            perp = np.array(edge_info["perp_dir"], dtype=np.float64)
+            expand = (min_h_px - roi_height) / 2.0
+            corners = trap["corners_px"].astype(np.float64)
+            projs = [float(np.dot(corners[i], perp)) for i in range(4)]
+            left_idxs = sorted(range(4), key=lambda i: projs[i])[:2]
+            right_idxs = sorted(range(4), key=lambda i: projs[i])[2:]
+            for i in left_idxs:
+                corners[i] -= perp * expand
+            for i in right_idxs:
+                corners[i] += perp * expand
+            trap = dict(trap)
+            trap["corners_px"] = np.clip(corners, 0, None).astype(np.float32)
+            trap["w_start"] = float(np.linalg.norm(trap["corners_px"][1] - trap["corners_px"][0]))
+            trap["w_end"] = float(np.linalg.norm(trap["corners_px"][2] - trap["corners_px"][3]))
+            out["trap"] = trap
+            new_h = min(trap["w_start"], trap["w_end"])
+            out["debug_info"]["roi_min_height_expanded"] = {"from_px": roi_height, "to_px": new_h}
+            print(f"  [roi_min_height] {roi_height:.1f}→{new_h:.1f}px "
+                  f"(img_h={img.shape[0]}, thr={min_h_px:.0f}px)")
+    except Exception as exc:
+        out["debug_info"]["roi_min_height"] = _make_debug_info("roi_min_height", exc)
 
     try:
         ok, reasons = validate_trapezoid(trap["corners_px"], img.shape, landmarks)
