@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from src.config import CFG
@@ -90,3 +91,71 @@ def detect_nut_prototype(result: dict) -> Optional[dict]:
         nut["reason"] = "fallback_safety_nut"
 
     return nut
+
+
+def detect_inlays_prototype(result: dict) -> list:
+    """Kísérleti inlay-detektálás a kanonikus képen — CSAK vizualizációhoz.
+
+    Keresi a 'dupla kis csúcs' mintázatot: 5–15 px szélességű, alacsony
+    amplitúdójú Sobel-X csúcspárokat, amelyek gitár nyakjelző (inlay) pontok
+    két szélét reprezentálhatják.
+
+    Args:
+        result: run_v14_pipeline() visszatérési értéke.
+
+    Returns:
+        list[dict] — minden dict = {canon_x, pair, confidence, heights}.
+        Üres lista ha canon nem elérhető, vagy nem találhatók párok.
+    """
+    canon = result.get("canon")
+    if canon is None:
+        return []
+    try:
+        from scipy.ndimage import gaussian_filter1d
+        from scipy.signal import find_peaks
+
+        gray = cv2.cvtColor(canon, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        col_profile = np.abs(sx).sum(axis=0)
+        mx = float(col_profile.max())
+        if mx < 1e-3:
+            return []
+        col_profile = col_profile / mx
+        col_profile = gaussian_filter1d(col_profile, sigma=0.8)
+
+        peaks, _ = find_peaks(
+            col_profile,
+            height=0.04,
+            distance=3,
+            prominence=0.015,
+            width=(1.0, 8.0),
+        )
+
+        inlays = []
+        used: set = set()
+        for i, p1 in enumerate(peaks):
+            if i in used:
+                continue
+            for j in range(i + 1, len(peaks)):
+                if j in used:
+                    continue
+                p2 = int(peaks[j])
+                sep = float(p2 - p1)
+                if sep > 15.0:
+                    break
+                if sep >= 5.0:
+                    h1 = float(col_profile[p1])
+                    h2 = float(col_profile[p2])
+                    if h1 < 0.55 and h2 < 0.55:
+                        inlays.append({
+                            "canon_x": float((p1 + p2) / 2.0),
+                            "pair": (float(p1), float(p2)),
+                            "confidence": float(min(h1, h2) / (max(h1, h2) + 1e-9)),
+                            "heights": (h1, h2),
+                        })
+                        used.add(i)
+                        used.add(j)
+                        break
+        return inlays
+    except Exception:
+        return []

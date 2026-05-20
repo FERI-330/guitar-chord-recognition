@@ -1,5 +1,71 @@
 # 📜 Projekt Fejlesztési Napló – Gitár Akkord Felismerő
 
+---
+
+## 🗓️ 2026-05-20 – Kéz nélküli fallback mód, ROI minimális magasság fix, inlay-detektálás kísérleti fázis
+
+### Motiváció
+
+A pipeline eddig megállt, ha a MediaPipe nem talált kezet a képen (`no_hough_lines` visszatérés),
+és a ROI esetenként túl vékony sávot adott, ami a kanonikus kép minőségét rontotta.
+Emellett a diagnosztikai csomag nem mutatott semmilyen nyakjelző (inlay) információt.
+
+### Elvégzett változtatások
+
+**`src/fretboard.py`**
+
+1. **`_global_hough_fallback(img, edges) → list`** — új helper:
+   - Ha `step2_hough` üres listát ad vissza ÉS `landmarks is None`,
+     permisszív HoughLinesP keresést indít (`threshold=20`, `minLineLength=w//5`, `maxLineGap=30`).
+   - Csak közel-vízszintes vonalakat tart meg (`|szög| ≤ 15°`), hossz szerint csökkentő sorrendbe rendez.
+   - Visszatérési formátum azonos `step2_hough`-éval: `list[(x1,y1,x2,y2)]`.
+
+2. **No-hand fallback path** a `run_v14_pipeline`-ban:
+   - `if not lines and landmarks is None:` → `_global_hough_fallback` hívás.
+   - Sikeres fallback: `debug_info["hough"]["fallback"] = "global_hough_no_hand"`.
+   - Ha a fallback sem talál vonalat: `invalid_reason = "no_hough_lines_no_hand"`.
+   - Kéz jelenlétekor a korábbi `no_hough_lines` visszatérés megmarad.
+
+3. **ROI minimális magasság** — a `if trap is None` blokk után, `validate_trapezoid` előtt:
+   - `roi_min_height_frac` CFG kulcs (alapértelmezés: `0.15`, azaz `img_h * 15%`).
+   - Ha `min(w_start, w_end) < min_h_px`: a négy sarokpont szimmetrikusan kitolódik
+     a `perp_dir` mentén (`expand = (min_h_px - roi_height) / 2`).
+   - A bal oldali sarkok (kisebb perp-vetület) `−perp * expand`, a jobb oldaliak `+perp * expand` irányban.
+   - `debug_info["roi_min_height_expanded"]` tárolja az előtte/utána értékeket.
+
+**`src/prototype_nut_detector.py`**
+
+- **`detect_inlays_prototype(result) → list[dict]`** — új, export-szintű függvény:
+  - Sobel-X oszlopprofilból keresi a `5–15 px` szélességű `dupla kis csúcs` párokat.
+  - Csúcsszűrő: `height≥0.04, prominence≥0.015, width∈[1,8]` — szándékosan gyengébb mint a bund-detektor.
+  - Párfeltétel: mindkét csúcs amplitúdója `< 0.55` (gyengébb mint az erős bund-csúcsok).
+  - Visszatért dict mezők: `canon_x, pair (p1,p2), confidence, heights`.
+  - Teljes `try/except` védelem — `None` canon esetén üres lista.
+
+**`src/viz_diagnostics.py`**
+
+- Import: `detect_inlays_prototype` is be lett húzva a `prototype_nut_detector`-ból.
+- `proto_inlays = _detect_inlays_proto(results)` hívás a főfüggvény tetején.
+- **`axs[10]` (Proto Nut+Inlay):**
+  - Nut: sárga `axvspan(nut_x−4, nut_x+4, alpha=0.35)` + szaggatott vonal.
+  - Inlays: kék `scatter` (`#3498db`, `s=28`) a ROI közepén.
+  - Cím tartalmazza az inlay-számot is.
+- **`axs[13]` (Canonical ROI + frets):**
+  - Nut: sárga axvspan (alpha=0.30) + szaggatott vonal.
+  - Inlays: kék scatter (`s=20`).
+- **`axs[15]` (Summary):**
+  - `── Prototype Inlays ─────────` blokk: max 6 sor `canon_x + confidence`.
+
+### Architektúra-invariancia
+
+- Az inlay-detektálás (`prototype_nut_detector.py`) és a nut-detektálás ugyanolyan izolációban fut, mint korábban:
+  az eredmények **soha** nem kerülnek a `FretDetector`-ba vagy feature vektorokba.
+- `_global_hough_fallback` csak akkor aktiválódik, ha `landmarks is None` ÉS a standard Hough üres volt —
+  nem interferál a kéz-alapú úttal.
+- `roi_min_height_frac = 0.15` CFG kulcson keresztül testre szabható; az expandálás `try/except`-tel védett.
+
+---
+
 **Projekt:** Gitár akkord felismerő szoftver gépi látással  
 **Szerző:** Magda Ferenc (U5O0BB)  
 **Dokumentum típusa:** Retrospektív fejlesztési napló – minden bejegyzés megmarad, semmi nem törlődik.
