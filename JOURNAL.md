@@ -2,6 +2,66 @@
 
 ---
 
+## 🗓️ 2026-05-21 – V14 unifikált pipeline, Streamlit szinkron, modellek újratanítása
+
+### Unifikált bemenet (list + upload determinisztikus egyenlőség)
+
+A `10_interactive_orchestrator.ipynb` és az `app.py` korábban eltérő kódutat futtatott a listából
+választott és a feltöltött képekre. A teljes javítási sorozat végeredménye:
+
+**Mindkét ág azonos láncon fut:**  
+`bytes → PIL (EXIF-transpose) → max_long_edge=0 (eredeti felbontás) → lossless PNG temp → run_v14_pipeline`
+
+Igazolt bit-azonosság (`max_px_diff=0`) ugyanarra a forrás-JPEG-re.
+
+**Módosított fájlok:**
+
+| Fájl | Változás |
+|---|---|
+| `src/preprocess.py` | `preprocess_image_input()` — default `max_long_edge=0` (no resize); resize csak explicit pozitív értékre |
+| `src/inference.py` | Temp fájl: `.jpg` → `.png` (lossless, nincs JPEG re-encoding artefakt) |
+| `src/config.py` | `sanity_min_aspect` 2.5→1.5; `area_limits.max_frac` 0.70→0.90; `sanity_trap_orient_angle_thr=35.0` |
+| `src/fretboard.py` | `trap_orientation` guard küszöb: hardcoded 20° → `CFG["sanity_trap_orient_angle_thr"]` |
+| `notebooks/10_interactive_orchestrator.ipynb` | Mindkét ág (list + upload) PIL+PNG temp útvonalat használ |
+
+### Streamlit szinkronizáció (app.py)
+
+Az `app.py` az `src/preprocess.py` `preprocess_image_input()` függvényét használja
+(`max_long_edge=1920`) minden képbeolvasáshoz:
+
+- `run_predict()`: `cv2.imdecode` → `preprocess_image_input(image_bytes, max_long_edge=1920)`
+- Fallback display: `decode_for_display()` segédfüggvény (cachelt, ugyanaz az előkészítés)
+- Diagnostic mode: szintén `preprocess_image_input` alapú decode
+- `src/inference.py`: temp fájl `.jpg` → `.png`
+
+### Modellek újratanítása (490 minta – augmented dataset)
+
+Futtatva: `python train_models.py --epochs-a 10 --epochs-b 10`
+
+**Test set eredmények (45 minta):**
+
+| Modell | Test Acc | Macro F1 | Fájl |
+|---|---|---|---|
+| SVM basic (56-dim) | **88.9%** | 0.870 | `svm_basic_v2.pkl` |
+| SVM inlay (60-dim) | 86.7% | 0.827 | `svm_inlay_v2.pkl` |
+| RF basic | 84.4% | 0.811 | `rf_basic_v1.pkl` |
+| RF inlay | 86.7% | 0.833 | `rf_inlay_v1.pkl` |
+| LR basic | 77.8% | 0.797 | `lr_basic_v1.pkl` |
+| LR inlay | 77.8% | 0.797 | `lr_inlay_v1.pkl` |
+| CNN MobileNetV3-Small (10+10 ep, CPU) | 80.0% | 0.780 | `cnn_v1.pth` |
+
+**Megjegyzések:**
+- Az augmentált adathalmazon (490 minta vs. 297 eredeti) a SVM basic 88.9%-ot ér el —
+  az előző legjobb SVM_B (91.1%) eredeti adatokon született, tehát a különbség az
+  augmentált train-val-test felosztás eltéréseiből adódhat.
+- A CNN Small 10 epoch alatt 84.4% val acc-t ér el; a korábbi legjobb (97.8%) a
+  MobileNetV3-**Large** volt, teljes fine-tuning-gal (nb12). A `train_models.py`
+  Small architektúrát és kevesebb epochot használ.
+- E osztályozók a `models/` mappában vannak; az elsődleges (bemutató) modell a
+  `checkpoints/best_mobilenet_v3_large_phB.pth` marad.
+
+---
+
 ## 🗓️ 2026-05-21 – Bemutató kész: FileUpload integráció, notebook cleanup, 1280×720 standard bemenet
 
 ### Rollback: visszaállás az 50d70c1 commitra

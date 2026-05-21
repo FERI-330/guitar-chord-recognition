@@ -23,6 +23,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config import PATHS
 from src.inference import CLASS_NAMES, InferenceResult, load_cnn, load_svm, predict
+from src.preprocess import preprocess_image_input
+
+# Max long-edge (px) for uploaded images — resizes 4K shots to a manageable size
+# while preserving aspect ratio. Pipeline thresholds tolerate this resolution.
+_UPLOAD_MAX_PX = 1920
 
 # ─── Oldal-konfiguráció ───────────────────────────────────────────────────────
 st.set_page_config(
@@ -43,13 +48,19 @@ def get_svm():
 # ─── Inferencia cache (kép + modell kombinációnként) ─────────────────────────
 @st.cache_data(show_spinner=False)
 def run_predict(image_bytes: bytes, use_cnn: bool) -> InferenceResult:
-    img_array = np.frombuffer(image_bytes, np.uint8)
-    image_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    image_bgr = preprocess_image_input(image_bytes, max_long_edge=_UPLOAD_MAX_PX)
     return predict(
         image_bgr,
         cnn_model=get_cnn() if use_cnn else None,
         svm_model=get_svm() if not use_cnn else None,
     )
+
+
+@st.cache_data(show_spinner=False)
+def decode_for_display(image_bytes: bytes) -> np.ndarray:
+    """Bytes → RGB numpy array a Streamlit st.image() számára."""
+    bgr = preprocess_image_input(image_bytes, max_long_edge=_UPLOAD_MAX_PX)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -124,11 +135,8 @@ if not diagnostic_mode:
             use_container_width=True,
         )
     else:
-        img_array = np.frombuffer(image_bytes, np.uint8)
-        orig_rgb = cv2.cvtColor(
-            cv2.imdecode(img_array, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
-        )
-        st.image(orig_rgb, caption="Eredeti kép (ROI nem detektálható)",
+        st.image(decode_for_display(image_bytes),
+                 caption="Eredeti kép (ROI nem detektálható)",
                  use_container_width=True)
 
     # Top-3 sávdiagram CNN esetén
@@ -151,8 +159,7 @@ else:
     st.divider()
     st.subheader("Pipeline Audit – 16 panel")
 
-    img_array = np.frombuffer(image_bytes, np.uint8)
-    image_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    image_bgr = preprocess_image_input(image_bytes, max_long_edge=_UPLOAD_MAX_PX)
 
     with st.spinner("Audit vizualizáció generálása..."):
         fig = create_full_pipeline_audit(image_bgr, result.pipeline_result)

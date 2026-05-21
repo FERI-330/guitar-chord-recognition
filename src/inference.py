@@ -89,8 +89,9 @@ def predict(
     if cnn_model is None and svm_model is None:
         raise ValueError("Provide at least one of cnn_model or svm_model.")
 
-    # 1. Save to a temp file — run_v14_pipeline requires a file path
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+    # 1. Save to a lossless temp file — run_v14_pipeline requires a file path.
+    # PNG avoids JPEG re-encoding artefacts that can shift MediaPipe landmarks.
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp_path = Path(tmp.name)
         cv2.imwrite(str(tmp_path), image_bgr)
 
