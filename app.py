@@ -1,9 +1,18 @@
 """
-app.py – Streamlit demo: Gitár Akkord Felismerő
+app.py – Streamlit demo: Gitár Akkord Felismerő  (V14.2)
 
 UI-logika. Minden pipeline-logika src/inference.py-ban van, hogy az
 eredmények 100%-ban azonosak legyenek a notebook run_v14_pipeline
 kimenetével.
+
+V14.2 változás:
+  _UPLOAD_MAX_PX = 0  → nincs méretezés, natív felbontáson fut a pipeline.
+  Indok: a Hough-paraméterek 4K képre vannak kalibrálva; 1920px-re
+  skálázva a vonalak száma 18→2-re esik vissza, ami GEOMETRIC fallbacket
+  okoz. max_long_edge=0 garantálja az azonos pipeline-viselkedést a
+  notebook és a Streamlit között.
+  EXIF-korrekció megmarad: a PIL.ImageOps.exif_transpose fut, de a
+  cv2.imdecode-os bypass tilos (EXIF elveszne, API is eltörne).
 
 Módok:
   Diagnostic OFF → canon_norm kép + akkord neve + pipeline debug expander
@@ -26,9 +35,12 @@ from src.config import PATHS
 from src.inference import CLASS_NAMES, InferenceResult, load_cnn, load_svm, predict
 from src.preprocess import preprocess_image_input
 
-# Max long-edge (px) for uploaded images — resizes 4K shots to a manageable size
-# while preserving aspect ratio. Pipeline thresholds tolerate this resolution.
-_UPLOAD_MAX_PX = 1920
+# V14.2: max_long_edge=0 → no resize. Hough params calibrated for 4K images;
+# downscaling to 1920px drops detected lines from 18 to 2 → GEOMETRIC fallback.
+_UPLOAD_MAX_PX = 0
+
+# Span threshold below which we warn about low image resolution.
+_SPAN_WARN_PX = 2000
 
 # Large arrays stripped from the JSON debug view to keep it readable.
 _STRIP_KEYS = frozenset({
@@ -65,6 +77,7 @@ def _pipeline_debug_values(pr: dict) -> dict:
     shear = pr.get("shear") or {}
     nut = pr.get("nut") or {}
     fit = pr.get("fit") or {}
+    split = pr.get("split") or {}
 
     # Neck span from trapezoid corner positions (TL → TR edge length)
     corners = (pr.get("trap") or {}).get("corners_px")
@@ -72,6 +85,11 @@ def _pipeline_debug_values(pr: dict) -> dict:
     if corners is not None:
         c = np.asarray(corners, dtype=np.float64)
         span_px = float(np.linalg.norm(c[1] - c[0]))
+
+    # Hough line counts from pipeline intermediate results
+    n_hough_total = len(pr.get("lines") or [])
+    n_long_lines = len(split.get("long_lines") or [])
+    n_fret_lines = len(split.get("fret_lines") or [])
 
     return {
         "nut_x": nut.get("nut_x"),
@@ -82,6 +100,9 @@ def _pipeline_debug_values(pr: dict) -> dict:
         "warp_stretch": pr.get("warp_stretch_factor"),
         "coverage": (fit.get("coverage_ratio") or 0.0),
         "n_visible": fit.get("n_visible", 0),
+        "n_hough_total": n_hough_total,
+        "n_long_lines": n_long_lines,
+        "n_fret_lines": n_fret_lines,
         "is_flipped": pr.get("is_flipped"),
         "nut_direction": pr.get("nut_direction"),
         "fret_detector": pr.get("fret_detector_method"),
@@ -149,7 +170,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("**Pipeline:** V14.1 (Hough + homográfia + 17.817 szabály)")
+    st.caption("**Pipeline:** V14.2 (Hough + homográfia + 17.817 szabály)")
     st.caption("**Osztályok:** " + ", ".join(CLASS_NAMES))
 
 use_cnn = model_choice.startswith("CNN")
@@ -192,14 +213,23 @@ m3.metric("Pipeline", "OK ✓" if result.ok else "FAIL ✗")
 with st.expander("🔍 Részletes Pipeline Diagnosztika"):
     dbg = _pipeline_debug_values(result.pipeline_result)
 
-    # Sub-pixel alignment info
-    st.caption(
+    # Sub-pixel alignment: bemeneti felbontás kiírva
+    st.info(
         f"**Bemeneti felbontás (Hough input):** "
-        f"{_input_shape[1]}×{_input_shape[0]} px  "
-        f"(max_long_edge={_UPLOAD_MAX_PX}) — "
-        f"notebook futásoknál max_long_edge=0 (natív felbontás)"
+        f"{_input_shape[1]}×{_input_shape[0]} px "
+        f"(max_long_edge={'natív – nincs resize' if _UPLOAD_MAX_PX == 0 else f'{_UPLOAD_MAX_PX} px'})"
     )
 
+    # Span < 2000px → low-resolution warning
+    if dbg["span_px"] is not None and dbg["span_px"] < _SPAN_WARN_PX:
+        st.warning(
+            f"⚠️ **Alacsony felbontás:** a detektált nyakszélesség "
+            f"{dbg['span_px']:.0f} px < {_SPAN_WARN_PX} px. "
+            "A Hough-paraméterek 4K képre vannak kalibrálva — "
+            "alacsony felbontáson a detekció megbízhatatlan lehet."
+        )
+
+    # Sor 1: Geometria
     dc1, dc2, dc3, dc4 = st.columns(4)
     _nut_str = f"{dbg['nut_x']:.1f}" if dbg["nut_x"] is not None else "N/A"
     _shear_str = f"{dbg['shear_angle_deg']:.2f}°" if dbg["shear_angle_deg"] is not None else "N/A"
@@ -207,16 +237,27 @@ with st.expander("🔍 Részletes Pipeline Diagnosztika"):
     _stretch_str = f"{dbg['warp_stretch']:.2f}×" if dbg["warp_stretch"] is not None else "N/A"
     dc1.metric("Nut X (px)", _nut_str)
     dc2.metric("Shear (°)", _shear_str,
-               help="step6d shear-korrekció szöge. Streamlit vs. notebook eltérés itt látszik.")
+               help="step6d shear-korrekció. Eltérés Streamlit vs. notebook közt itt jelenik meg.")
     dc3.metric("Span (px)", _span_str,
-               help="Nyakszélesség (TL→TR trapézoid él) pixelben. Felbontás-függő.")
+               help="TL→TR trapézoid él hossza. 4K képen ~2800px, 1920px-en ~1600px.")
     dc4.metric("Warp stretch", _stretch_str)
 
+    # Sor 2: Hough vonalak + fretboard
     dc5, dc6, dc7, dc8 = st.columns(4)
-    dc5.metric("Coverage", f"{dbg['coverage']:.0%}")
-    dc6.metric("N frets matched", str(dbg["n_visible"]))
-    dc7.metric("Is flipped", "Igen" if dbg["is_flipped"] else "Nem")
-    dc8.metric("Fret detector", dbg["fret_detector"] or "N/A")
+    dc5.metric("Hough sorok (össz.)", str(dbg["n_hough_total"]),
+               help="step2_hough total lines — 4K képen tipikusan 15-20, 1920px-en 2-5.")
+    dc6.metric("Long / Fret sorok", f"{dbg['n_long_lines']} / {dbg['n_fret_lines']}",
+               help="Nyakkal párhuzamos (long) és merőleges (fret) vonalak step4 után.")
+    dc7.metric("Coverage", f"{dbg['coverage']:.0%}")
+    dc8.metric("N frets matched", str(dbg["n_visible"]))
+
+    # Sor 3: Osztályozás info
+    dc9, dc10, dc11, dc12 = st.columns(4)
+    dc9.metric("Is flipped", "Igen" if dbg["is_flipped"] else "Nem")
+    dc10.metric("Fret detector", dbg["fret_detector"] or "N/A",
+                help="INTENSITY_DATA = Sobel (jó). GEOMETRIC_RULE = fallback (kevés vonal).")
+    dc11.metric("Shear n_lines", str(dbg["shear_n_lines"]))
+    dc12.metric("Shear corrected", "Igen" if dbg["shear_corrected"] else "Nem")
 
     if dbg["invalid_reason"]:
         st.error(f"**invalid_reason:** {dbg['invalid_reason']}")

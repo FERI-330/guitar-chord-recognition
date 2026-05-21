@@ -1,6 +1,6 @@
 # Guitar Chord Recognition – Teljes Technikai Dokumentáció
 
-**Verzió:** V14.1 Pipeline  
+**Verzió:** V14.2 Pipeline  
 **Dátum:** 2026-05-21  
 **Projekt:** `guitar-chord-recognition`  
 
@@ -23,6 +23,27 @@
 ### V14.1 Standard
 
 > **Bit-szintű azonosság követelmény:** minden bemeneti interfész (notebook, CLI, Streamlit) kizárólag a `src/preprocess.py::preprocess_image_input(raw_bytes, max_long_edge)` függvényen keresztül tölthet be képet. Más betöltési út (`cv2.imread`, `cv2.imdecode`, `PIL.Image.open` közvetlen) tilos, mert az EXIF-transzponálás és az interpoláció eltérő pixel-értékeket adhat → Hough/MediaPipe eredmény mismatch.
+
+### V14.2 – Streamlit Hough-konzisztencia fix
+
+**Probléma azonosítva:** `max_long_edge=1920` a Streamlit-ben a 4K képet ~55%-ra skálázta → Hough-vonalak száma 18→2-re esett vissza → `GEOMETRIC_RULE` fallback, nem `INTENSITY_DATA` (Sobel).
+
+**Gyökérok:** a Hough-paraméterek (`threshold=30`, `minLineLength=15% of min(H,W)`) 4K felbontásra vannak kalibrálva. A `threshold=30` abszolút szavazatszám — kisebb képen a rövidebb vonalszakaszok kevesebb szavazatot gyűjtenek.
+
+**Fix:** `_UPLOAD_MAX_PX = 0` → nincs resize, a Streamlit natív felbontáson fut, pontosan mint a notebook.
+
+**Miért NEM `cv2.imdecode`?**
+- `preprocess_image_input(raw_bytes: bytes, ...)` bytesot vár, nem numpy arrayt → API törne
+- `cv2.imdecode` nem kezeli az EXIF-orientációt → mobil portrék elforgatva érkeznének
+- A felbontási különbség volt az ok, nem a PIL-dekódolás módja
+
+**Debug UI (V14.2):**
+
+| Új metrika | Forrás | Cél |
+|-----------|--------|-----|
+| `Hough sorok (össz.)` | `len(result["lines"])` | Tipikusan 15-20 @ 4K, 2-5 @ 1920px |
+| `Long / Fret sorok` | `len(split["long_lines"]) / len(split["fret_lines"])` | Nyak- vs. bund-párhuzamos vonalak |
+| Span < 2000px warning | `span_px < _SPAN_WARN_PX` | Alacsony felbontás figyelmeztető |
 
 ### 1.1 Átfogó adatfolyam
 
@@ -398,7 +419,7 @@ A `src/preprocess.py::preprocess_image_input(raw_bytes, max_long_edge=0)` függv
 
 **Determinisztikus ekvivalencia (list vs. upload):** mindkét notebook-ág (képlista-választás és feltöltés) azonos `preprocess_image_input → cv2.imwrite(.png) → run_v14_pipeline` láncon megy át → bit-azonos kimenet garantált (igazolt: max pixel diff = 0).
 
-**Felbontáskülönbség (Streamlit vs. notebook):** Streamlit `max_long_edge=1920`, notebook `max_long_edge=0`. Ez a Hough-transzformáció bemeneti képének méretét és így a pixel-szintű span/shear értékeket befolyásolja. A `🔍 Részletes Pipeline Diagnosztika` expander ezért mindig megjeleníti a bemeneti felbontást → látható, mikor tér el a lokális futástól.
+**Felbontáskülönbség (V14.2 után eliminálva):** mindkét interfész `max_long_edge=0` → natív felbontás, azonos Hough-eredmény. A `🔍 Részletes Pipeline Diagnosztika` expander mindig megjeleníti a bemeneti felbontást mint sanity-check.
 
 **Elavult:** a korábban dokumentált `_to_720p()` függvény már nem létezik; `preprocess_image_input` váltja fel teljes egészében.
 
