@@ -6,7 +6,7 @@ eredmények 100%-ban azonosak legyenek a notebook run_v14_pipeline
 kimenetével.
 
 Módok:
-  Diagnostic OFF → csak canon_norm kép + akkord neve
+  Diagnostic OFF → canon_norm kép + akkord neve + pipeline debug expander
   Diagnostic ON  → 16 paneles viz_diagnostics audit nézet
 
 Indítás:
@@ -14,6 +14,7 @@ Indítás:
 """
 import sys
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -28,6 +29,65 @@ from src.preprocess import preprocess_image_input
 # Max long-edge (px) for uploaded images — resizes 4K shots to a manageable size
 # while preserving aspect ratio. Pipeline thresholds tolerate this resolution.
 _UPLOAD_MAX_PX = 1920
+
+# Large arrays stripped from the JSON debug view to keep it readable.
+_STRIP_KEYS = frozenset({
+    "img", "canon", "canon_norm", "canon_pre_shear",
+    "finger_mask", "hand_mask", "H", "H_inv",
+    "edges", "edges_masked",
+})
+
+
+def _to_json(value: Any) -> Any:
+    """Recursively convert pipeline result values to JSON-serializable types.
+
+    Large numpy arrays are replaced with a shape descriptor string.
+    """
+    if isinstance(value, np.ndarray):
+        if value.size <= 20:
+            return value.tolist()
+        return f"<ndarray shape={list(value.shape)} dtype={value.dtype}>"
+    if isinstance(value, dict):
+        return {k: _to_json(v) for k, v in value.items() if k not in _STRIP_KEYS}
+    if isinstance(value, (list, tuple)):
+        return [_to_json(v) for v in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return value
+
+
+def _pipeline_debug_values(pr: dict) -> dict:
+    """Extract key scalar diagnostics from the raw pipeline result dict."""
+    shear = pr.get("shear") or {}
+    nut = pr.get("nut") or {}
+    fit = pr.get("fit") or {}
+
+    # Neck span from trapezoid corner positions (TL → TR edge length)
+    corners = (pr.get("trap") or {}).get("corners_px")
+    span_px = None
+    if corners is not None:
+        c = np.asarray(corners, dtype=np.float64)
+        span_px = float(np.linalg.norm(c[1] - c[0]))
+
+    return {
+        "nut_x": nut.get("nut_x"),
+        "shear_angle_deg": shear.get("shear_angle_deg"),
+        "shear_corrected": shear.get("corrected", False),
+        "shear_n_lines": shear.get("n_lines", 0),
+        "span_px": span_px,
+        "warp_stretch": pr.get("warp_stretch_factor"),
+        "coverage": (fit.get("coverage_ratio") or 0.0),
+        "n_visible": fit.get("n_visible", 0),
+        "is_flipped": pr.get("is_flipped"),
+        "nut_direction": pr.get("nut_direction"),
+        "fret_detector": pr.get("fret_detector_method"),
+        "invalid_reason": pr.get("invalid_reason"),
+    }
+
 
 # ─── Oldal-konfiguráció ───────────────────────────────────────────────────────
 st.set_page_config(
@@ -45,6 +105,7 @@ def get_cnn():
 def get_svm():
     return load_svm()
 
+
 # ─── Inferencia cache (kép + modell kombinációnként) ─────────────────────────
 @st.cache_data(show_spinner=False)
 def run_predict(image_bytes: bytes, use_cnn: bool) -> InferenceResult:
@@ -61,6 +122,7 @@ def decode_for_display(image_bytes: bytes) -> np.ndarray:
     """Bytes → RGB numpy array a Streamlit st.image() számára."""
     bgr = preprocess_image_input(image_bytes, max_long_edge=_UPLOAD_MAX_PX)
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -87,7 +149,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("**Pipeline:** V14 (Hough + homográfia + 17.817 szabály)")
+    st.caption("**Pipeline:** V14.1 (Hough + homográfia + 17.817 szabály)")
     st.caption("**Osztályok:** " + ", ".join(CLASS_NAMES))
 
 use_cnn = model_choice.startswith("CNN")
@@ -115,12 +177,55 @@ image_bytes = uploaded.getbuffer().tobytes()
 with st.spinner("Pipeline futtatás és osztályozás..."):
     result = run_predict(image_bytes, use_cnn)
 
+# Sub-pixel alignment: decode the preprocessed shape for consistency audit
+_input_bgr = preprocess_image_input(image_bytes, max_long_edge=_UPLOAD_MAX_PX)
+_input_shape = _input_bgr.shape  # (H, W, 3) after preprocess
+
 # ─── Eredmény metrikák (mindig látható) ───────────────────────────────────────
 st.divider()
 m1, m2, m3 = st.columns(3)
 m1.metric("Akkord", result.chord)
 m2.metric("Confidence", f"{result.confidence:.1%}")
 m3.metric("Pipeline", "OK ✓" if result.ok else "FAIL ✗")
+
+# ─── Pipeline Debug Expander (mindig látható) ─────────────────────────────────
+with st.expander("🔍 Részletes Pipeline Diagnosztika"):
+    dbg = _pipeline_debug_values(result.pipeline_result)
+
+    # Sub-pixel alignment info
+    st.caption(
+        f"**Bemeneti felbontás (Hough input):** "
+        f"{_input_shape[1]}×{_input_shape[0]} px  "
+        f"(max_long_edge={_UPLOAD_MAX_PX}) — "
+        f"notebook futásoknál max_long_edge=0 (natív felbontás)"
+    )
+
+    dc1, dc2, dc3, dc4 = st.columns(4)
+    _nut_str = f"{dbg['nut_x']:.1f}" if dbg["nut_x"] is not None else "N/A"
+    _shear_str = f"{dbg['shear_angle_deg']:.2f}°" if dbg["shear_angle_deg"] is not None else "N/A"
+    _span_str = f"{dbg['span_px']:.0f}" if dbg["span_px"] is not None else "N/A"
+    _stretch_str = f"{dbg['warp_stretch']:.2f}×" if dbg["warp_stretch"] is not None else "N/A"
+    dc1.metric("Nut X (px)", _nut_str)
+    dc2.metric("Shear (°)", _shear_str,
+               help="step6d shear-korrekció szöge. Streamlit vs. notebook eltérés itt látszik.")
+    dc3.metric("Span (px)", _span_str,
+               help="Nyakszélesség (TL→TR trapézoid él) pixelben. Felbontás-függő.")
+    dc4.metric("Warp stretch", _stretch_str)
+
+    dc5, dc6, dc7, dc8 = st.columns(4)
+    dc5.metric("Coverage", f"{dbg['coverage']:.0%}")
+    dc6.metric("N frets matched", str(dbg["n_visible"]))
+    dc7.metric("Is flipped", "Igen" if dbg["is_flipped"] else "Nem")
+    dc8.metric("Fret detector", dbg["fret_detector"] or "N/A")
+
+    if dbg["invalid_reason"]:
+        st.error(f"**invalid_reason:** {dbg['invalid_reason']}")
+
+    if dbg["nut_direction"]:
+        st.info(f"**Nut irány:** {dbg['nut_direction']}")
+
+    with st.expander("Teljes pipeline result dict (nagy tömbök nélkül)"):
+        st.json(_to_json(result.pipeline_result))
 
 # ─── DIAGNOSTIC MODE OFF → egyszerű nézet ────────────────────────────────────
 if not diagnostic_mode:

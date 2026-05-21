@@ -1,6 +1,6 @@
 # Guitar Chord Recognition – Teljes Technikai Dokumentáció
 
-**Verzió:** V14 Pipeline (stabilizált)  
+**Verzió:** V14.1 Pipeline  
 **Dátum:** 2026-05-21  
 **Projekt:** `guitar-chord-recognition`  
 
@@ -18,7 +18,11 @@
 
 ---
 
-## 1. Magas szintű Pipeline (V14)
+## 1. Magas szintű Pipeline (V14.1)
+
+### V14.1 Standard
+
+> **Bit-szintű azonosság követelmény:** minden bemeneti interfész (notebook, CLI, Streamlit) kizárólag a `src/preprocess.py::preprocess_image_input(raw_bytes, max_long_edge)` függvényen keresztül tölthet be képet. Más betöltési út (`cv2.imread`, `cv2.imdecode`, `PIL.Image.open` közvetlen) tilos, mert az EXIF-transzponálás és az interpoláció eltérő pixel-értékeket adhat → Hough/MediaPipe eredmény mismatch.
 
 ### 1.1 Átfogó adatfolyam
 
@@ -26,7 +30,7 @@
 Bemeneti kép (raw bytes / BGR)
         │
         ▼
-[preprocess_image_input]
+[preprocess_image_input]   ← egyetlen engedélyezett belépési pont
   PIL megnyitás → EXIF-transpose → opcionális LANCZOS kicsinyítés
   → BGR numpy array (natív felbontás, ha max_long_edge=0)
         │
@@ -394,6 +398,8 @@ A `src/preprocess.py::preprocess_image_input(raw_bytes, max_long_edge=0)` függv
 
 **Determinisztikus ekvivalencia (list vs. upload):** mindkét notebook-ág (képlista-választás és feltöltés) azonos `preprocess_image_input → cv2.imwrite(.png) → run_v14_pipeline` láncon megy át → bit-azonos kimenet garantált (igazolt: max pixel diff = 0).
 
+**Felbontáskülönbség (Streamlit vs. notebook):** Streamlit `max_long_edge=1920`, notebook `max_long_edge=0`. Ez a Hough-transzformáció bemeneti képének méretét és így a pixel-szintű span/shear értékeket befolyásolja. A `🔍 Részletes Pipeline Diagnosztika` expander ezért mindig megjeleníti a bemeneti felbontást → látható, mikor tér el a lokális futástól.
+
 **Elavult:** a korábban dokumentált `_to_720p()` függvény már nem létezik; `preprocess_image_input` váltja fel teljes egészében.
 
 ### 2b.2 Trapézoid validálás – kiterjesztett szanitás
@@ -615,12 +621,14 @@ ImageNet pretrained MobileNetV3-Large
 streamlit run app.py
 ```
 
-**Kettős nézet:**
+**Háromrétegű nézet:**
 
-| Mód | Tartalom |
-|-----|----------|
-| **Consumer** (Diagnostic OFF) | canon_norm kép + akkord neve + coverage + top-3 sávdiagram (CNN esetén) |
-| **Advanced Diagnostic** (Diagnostic ON) | 16-paneles pipeline audit (matplotlib figura) |
+| Réteg | Mindig látható? | Tartalom |
+|-------|-----------------|----------|
+| **Eredmény metrikák** | Igen | Akkord, Confidence, Pipeline OK/FAIL |
+| **Pipeline Debug Expander** | Igen | Nut X, Shear°, Span px, Stretch, Coverage, Is Flipped, bemeneti felbontás, teljes result dict JSON |
+| **Consumer** (Diagnostic OFF) | Csak ha OFF | canon_norm kép + top-3 sávdiagram |
+| **Advanced Diagnostic** (Diagnostic ON) | Csak ha ON | 16-paneles pipeline audit (matplotlib figura) |
 
 **Modell-választás (sidebar):**
 
@@ -660,6 +668,19 @@ InferenceResult(chord, confidence, top3, ok, coverage, pipeline_result, overlay_
 **Fontos:** a CNN az eredeti `image_bgr`-t kapja (nem a canon_norm-ot), a saját `get_transforms("val")` ImageNet normalizációjával. Az SVM a pipeline result `assemble_feature_vector`-ából csak az első 42 dimenziót (Group B) veszi (`GROUP_B_SIZE = 42`).
 
 **PNG temp fájl indoka:** a `cv2.imwrite(.jpg)` JPEG-veszteséges tömörítése pixel-értékeket tol el, ami MediaPipe landmark-koordináta eltéréseket okoz. PNG (lossless) eliminálja a mismatch-et.
+
+**Pipeline Debug Expander (`🔍 Részletes Pipeline Diagnosztika`):**
+
+A Streamlit UI-ban mindig elérhető (összecsukott, de nem kell diagnosztikai módot aktiválni):
+
+| Debug érték | Forrás a result dict-ben | Cél |
+|-------------|--------------------------|-----|
+| Nut X (px) | `result["nut"]["nut_x"]` | Nut detekció konzisztencia |
+| Shear angle (°) | `result["shear"]["shear_angle_deg"]` | step6d shear-korrekció; ingadozás (pl. −0.59°↔−2.32°) jelzi a felbontáskülönbséget |
+| Span (px) | `norm(trap["corners_px"][1] − trap["corners_px"][0])` | TL→TR él hossza; felbontás-arányos |
+| Warp stretch | `result["warp_stretch_factor"]` | >2.0 → low_confidence |
+| Bemeneti felbontás | `preprocess_image_input` kimenet `.shape` | Sub-pixel alignment audit: Streamlit 1920px, notebook natív |
+| Teljes result dict | `_to_json(result.pipeline_result)` | Nagy tömbök (H, canon, stb.) shape-stringgé alakítva |
 
 ### 5.2 Vizualizációs réteg (`viz_diagnostics.py`) – 16 panel
 
