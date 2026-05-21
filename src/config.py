@@ -54,9 +54,14 @@ CFG: dict = {
     "trapezoid_clamp_enabled": False,    # wrist-alapú ROI clamp: KI (Nut regresszió ellen)
     "trapezoid_clamp_margin_px": 120,    # ha BE: test-oldali margó px (régi hardcoded: 30)
     # STEP 6 – Sanity checks (kezdeti, megengedőbb fázis)
-    "sanity_min_aspect": 2.5,
-    "sanity_area_limits": {"min_frac": 0.004, "max_frac": 0.70},
+    # sanity_min_aspect: 1.5 (volt: 2.5) — közeli képen a nyak rövidebbnek látszik arányban
+    "sanity_min_aspect": 1.5,
+    # max_frac: 0.90 (volt: 0.70) — közeli képen a nyak > 70%-ot is lefedhet
+    "sanity_area_limits": {"min_frac": 0.004, "max_frac": 0.90},
     "sanity_max_edge_angle_diff_deg": 20.0,
+    # trap_orient küszöb: Hough vonalak átlagos szöge, ami felett a "tall trap" elutasítódik.
+    # 35° (volt: hardcoded 20°) — közeli, enyhén dőlt képek tolerálásához szükséges.
+    "sanity_trap_orient_angle_thr": 35.0,
     # STEP 6b – Nut detektálás
     "nut_width_filter_enabled": True,   # FWHM-alapú nut vs. bund diszkrimináció
     "nut_constraints": NUT_CONSTRAINTS,

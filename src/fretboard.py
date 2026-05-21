@@ -1120,16 +1120,17 @@ def run_v14_pipeline(img_entry: dict,
             _mean_ang = (float(np.average(_ang_vals, weights=_ang_wts))
                          if _ang_wts else 90.0)
             out["debug_info"]["trap_orientation"]["lines_mean_angle"] = _mean_ang
-            if _mean_ang <= 20.0:
+            _orient_thr = float(CFG.get("sanity_trap_orient_angle_thr", 20.0))
+            if _mean_ang <= _orient_thr:
                 out["debug_info"]["trap_orientation"]["reason"] = "tall_but_horizontal_lines_allowed"
                 print(f"  [trap_orient] ALLOW: tall trap (h={_trap_h:.0f}>w={_trap_w:.0f}) "
-                      f"but lines_mean_angle={_mean_ang:.1f}°≤20° → likely close-up camera")
+                      f"but lines_mean_angle={_mean_ang:.1f}°≤{_orient_thr}° → likely close-up camera")
             else:
                 out["invalid_reason"] = (f"trap_orientation: h({_trap_h:.0f})>w({_trap_w:.0f}) "
-                                         f"lines_angle={_mean_ang:.1f}°")
+                                         f"lines_angle={_mean_ang:.1f}°>{_orient_thr}°")
                 out["debug_info"]["trap_orientation"]["reason"] = "vertical_trapezoid_rejected"
                 print(f"  [trap_orient] REJECT: vertical trap h={_trap_h:.0f}>w={_trap_w:.0f}px "
-                      f"lines_mean_angle={_mean_ang:.1f}°")
+                      f"lines_mean_angle={_mean_ang:.1f}°>{_orient_thr}°")
                 return out
     except Exception as exc:
         out["debug_info"]["trap_orientation"] = _make_debug_info("trap_orientation", exc)

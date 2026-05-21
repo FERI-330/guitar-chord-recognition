@@ -8,10 +8,56 @@ a detektáló logika (FretDetectorInterface) semmit sem tud az előfeldolgozásr
 """
 from __future__ import annotations
 
+import io
+
 import cv2
 import numpy as np
+from PIL import Image as PILImage
+from PIL import ImageOps
 
 from src.config import PREPROCESSING_CONFIG
+
+def preprocess_image_input(raw_bytes: bytes, max_long_edge: int = 0) -> np.ndarray:
+    """Feltöltött képbájt → BGR numpy tömb, egységesített előkészítéssel.
+
+    Lépések:
+      1. PIL megnyitás (EXIF-tudatos)
+      2. ImageOps.exif_transpose — telefon/kamera elforgatás korrekció
+      3. Arányőrző kicsinyítés, ha max(w, h) > max_long_edge (csak ha max_long_edge > 0)
+      4. PIL RGB → OpenCV BGR konverzió
+
+    Args:
+        raw_bytes:     A feltöltött képfájl nyers bájttartalma.
+        max_long_edge: Ha > 0 és a kép hosszabb éle ennél nagyobb, arányőrzve kicsinyíti.
+                       0 (alapértelmezett) = nincs kicsinyítés, eredeti felbontás megmarad.
+
+    Returns:
+        BGR numpy uint8 tömb, amit a pipeline közvetlenül felhasználhat.
+
+    Raises:
+        ValueError: Ha a bájttartalom nem érvényes képfájl.
+    """
+    try:
+        pil_img = PILImage.open(io.BytesIO(raw_bytes))
+    except Exception as exc:
+        raise ValueError(f"Érvénytelen képfájl: {exc}") from exc
+
+    pil_img = ImageOps.exif_transpose(pil_img)
+
+    if pil_img.mode != "RGB":
+        pil_img = pil_img.convert("RGB")
+
+    if max_long_edge > 0:
+        w, h = pil_img.size
+        long_edge = max(w, h)
+        if long_edge > max_long_edge:
+            scale = max_long_edge / long_edge
+            new_w = max(1, round(w * scale))
+            new_h = max(1, round(h * scale))
+            pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
+
+    img_bgr = cv2.cvtColor(np.asarray(pil_img, dtype=np.uint8), cv2.COLOR_RGB2BGR)
+    return img_bgr
 
 
 class ImagePreprocessor:
